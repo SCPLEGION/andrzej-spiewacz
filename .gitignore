@@ -1,0 +1,15 @@
+node_modules/
+dist/
+*.log
+
+# Secrets & local config
+.env
+.env.local
+
+# go-librespot runtime state
+bin/
+state/
+*.fifo
+
+# OS
+.DS_Store

@@ -1,0 +1,37 @@
+{
+  "name": "andrzej-spiewacz",
+  "version": "0.1.0",
+  "description": "Discord voice bot that streams Spotify into a voice channel via go-librespot (legit Spotify Connect, Premium account).",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "register": "tsx src/discord/register-commands.ts",
+    "login": "tsx src/login.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "node --import tsx --test \"test/**/*.test.ts\"",
+    "test:watch": "node --import tsx --test --watch \"test/**/*.test.ts\"",
+    "install:librespot": "bash scripts/install-go-librespot.sh"
+  },
+  "dependencies": {
+    "@discordjs/opus": "^0.10.0",
+    "@discordjs/voice": "^0.18.0",
+    "discord.js": "^14.16.3",
+    "dotenv": "^16.4.7",
+    "sodium-native": "^4.3.1",
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.5",
+    "@types/ws": "^8.5.13",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.3"
+  },
+  "allowScripts": {
+    "@discordjs/opus@0.10.0": true
+  }
+}
