@@ -147,6 +147,12 @@ system on the site itself; possession of the link is the auth, the same trust
 model as an emailed magic link. Running `/link` again invalidates whatever link
 was pending before.
 
+The bare domain (`/`) isn't a dashboard — it's just a small fallback page with
+a box to paste your token (or the whole link) into, for anyone who lands there
+instead of clicking their `/link` link directly. Getting "not found" visiting
+the bare domain is expected; getting it after clicking the actual Discord link
+means the reverse proxy isn't reaching port `8078`.
+
 **Voice channel status.** The status page also has a small radio-button toggle
 — *Wyłączony* (off), *Nazwa piosenki* (song name), or *Teksty na żywo*
 (live lyrics) — that sets what shows up under your voice channel's name in

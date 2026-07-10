@@ -5,6 +5,7 @@ import {
   generateToken,
   LinkSessionStore,
   renderExpiredPage,
+  renderHomePage,
   renderLinkForm,
   renderStatusPage,
 } from "../src/linkPortal.js";
@@ -72,6 +73,15 @@ test("renderExpiredPage: mentions expiry and escapes a hostile device name", () 
   const html = renderExpiredPage(`<img src=x onerror=alert(1)>`);
   assert.match(html, /<!doctype html>/i);
   assert.ok(html.includes("wygasł"));
+  assert.ok(html.includes("/link"));
+  assert.ok(!html.includes("<img src=x"));
+  assert.ok(html.includes("&lt;img src=x"));
+});
+
+test("renderHomePage: offers a token box and escapes a hostile device name", () => {
+  const html = renderHomePage(`<img src=x onerror=alert(1)>`);
+  assert.match(html, /<!doctype html>/i);
+  assert.ok(html.includes('id="tok"'));
   assert.ok(html.includes("/link"));
   assert.ok(!html.includes("<img src=x"));
   assert.ok(html.includes("&lt;img src=x"));

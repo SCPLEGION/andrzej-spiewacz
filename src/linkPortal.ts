@@ -106,6 +106,26 @@ export function renderExpiredPage(deviceName: string): string {
   `);
 }
 
+/**
+ * The domain's root page. There's no dashboard here (each token is a private,
+ * user-scoped session) — just a fallback box to manually paste either the
+ * bare token or the whole link Discord gave you, for anyone who lands on the
+ * bare domain instead of clicking their /link link directly.
+ */
+export function renderHomePage(deviceName: string): string {
+  return pageShell(deviceName, deviceName, `
+    <p class="muted">Ta strona nie ma nic do pokazania sama z siebie — link
+    dostajesz na Discordzie po komendzie <code>/link</code>, kliknij w niego.</p>
+    <p>Zgubiłeś link? Wklej tutaj sam token (albo cały link) i przejdź dalej:</p>
+    <form onsubmit="event.preventDefault();
+      var v = document.getElementById('tok').value.trim().split('/').filter(Boolean).pop();
+      if (v) location.href = '/link/' + encodeURIComponent(v);">
+      <input id="tok" type="text" placeholder="token albo cały link z Discorda" required autofocus />
+      <button class="btn" type="submit">Przejdź</button>
+    </form>
+  `);
+}
+
 /** The two-step "authorize, then paste the redirect URL" form. */
 export function renderLinkForm(opts: {
   token: string;
@@ -251,6 +271,16 @@ export class LinkPortal {
 
   private async handle(req: IncomingMessage, res: ServerResponse): Promise<void> {
     const url = new URL(req.url ?? "/", "http://localhost");
+
+    if (url.pathname === "/") {
+      if (req.method !== "GET") {
+        res.writeHead(405, { "content-type": "text/plain" });
+        res.end("method not allowed");
+        return;
+      }
+      return this.sendHtml(res, 200, renderHomePage(config.librespot.deviceName));
+    }
+
     const modeMatch = url.pathname.match(/^\/link\/([^/]+)\/mode$/);
     if (modeMatch?.[1]) {
       if (req.method !== "POST") {
