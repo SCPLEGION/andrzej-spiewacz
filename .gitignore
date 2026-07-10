@@ -5,6 +5,7 @@ dist/
 # Secrets & local config
 .env
 .env.local
+.env.bak
 
 # go-librespot runtime state
 bin/

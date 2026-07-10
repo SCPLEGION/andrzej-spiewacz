@@ -14,7 +14,10 @@ services:
 
     volumes:
       - ./state:/app/state
-      - ./bin:/app/bin
+      # No bin/ mount: go-librespot is already baked into the image at build
+      # time (see Dockerfile). Mounting a host ./bin here would shadow it with
+      # an empty directory unless you'd separately run
+      # `npm run install:librespot` on the host, defeating the point of Docker.
 
     ports:
       - "8077:8077"

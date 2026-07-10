@@ -400,9 +400,17 @@ export class LibrespotManager extends EventEmitter {
     // start() returns immediately (the websocket attaches in the background once
     // the API binds, which for an un-logged-in slot only happens after the user
     // submits the code). The URL we need is emitted from the daemon logs first.
-    void this.start().catch((err) =>
-      console.error(`[librespot#${this.slot.index}] relink: ${(err as Error).message}`),
-    );
+    // If start() itself fails outright (binary missing, mkfifo denied, …) there's
+    // no daemon to ever emit that URL — surface the real error immediately
+    // instead of leaving the caller to wait out the full timeout for a generic
+    // "timed out" message.
+    void this.start().catch((err) => {
+      const message = err instanceof Error ? err.message : String(err);
+      console.error(`[librespot#${this.slot.index}] relink: ${message}`);
+      clearTimeout(timer);
+      this.off("authUrl", onUrl);
+      void this.stop().finally(() => rejectUrl(err instanceof Error ? err : new Error(message)));
+    });
     return urlPromise;
   }
 
