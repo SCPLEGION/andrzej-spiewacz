@@ -221,3 +221,22 @@ the image and only fixable on the Proxmox side: Docker itself needs the LXC's
 **nesting** feature enabled (container → *Options* → *Features* → check
 `nesting`, plus `keyctl` if Docker complains about it) — without it, Docker
 inside the LXC won't start at all.
+
+**Deploying updates.** `.github/workflows/docker-publish.yml` builds and pushes
+the image to GHCR (`ghcr.io/scplegion/andrzej-spiewacz:latest`) on every push
+to `main` — the server never needs to `git clone` or build anything. Once,
+first time:
+
+```bash
+# On the server, next to your docker-compose.yml + .env:
+docker login ghcr.io -u SCPLEGION   # only needed if the package stays private
+docker compose pull
+docker compose up -d
+```
+
+To deploy a new version later, just re-run `docker compose pull && docker
+compose up -d`. (First push from Actions creates the package as **private** by
+default — either make it public under the repo's *Packages* tab so `pull`
+needs no login, or keep it private and use a
+[PAT with `read:packages`](https://docs.github.com/en/packages/working-with-a-github-packages-registry/working-with-the-container-registry)
+for the `docker login` above.)
