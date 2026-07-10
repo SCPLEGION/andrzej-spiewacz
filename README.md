@@ -147,6 +147,21 @@ system on the site itself; possession of the link is the auth, the same trust
 model as an emailed magic link. Running `/link` again invalidates whatever link
 was pending before.
 
+**Voice channel status.** The status page also has a small radio-button toggle
+— *Wyłączony* (off), *Nazwa piosenki* (song name), or *Teksty na żywo*
+(live lyrics) — that sets what shows up under your voice channel's name in
+Discord's channel list (the same "voice channel status" feature Discord added
+in 2024, set via `PUT /channels/{id}/voice-status`). "Song name" posts
+`🎵 Artist — Title` on every track change; "live lyrics" fetches synced lyrics
+(same source as `/lyrics`) and updates the status to the current line roughly
+every 8s (throttled — Discord rate-limits this endpoint, and a line-by-line
+push would spam it), falling back to the song name when a track has no synced
+lyrics. It's per-user: each person picks their own, takes effect immediately if
+they're already streaming, and clears when they `/leave`. **The bot needs the
+"Set Voice Channel Status" permission** (or Manage Channels) in the target
+channel — without it, updates just fail silently (logged as a warning) and
+playback is unaffected.
+
 **This is meant to sit behind your own reverse proxy** (nginx/Caddy/Traefik) —
 the app itself just listens on plain HTTP (`LINK_PORTAL_HOST=0.0.0.0`,
 `LINK_PORTAL_PORT=8078` by default; `docker-compose.yml` publishes `8078`).
@@ -188,7 +203,8 @@ npm run typecheck
 Tests live in `test/` and cover the pure logic — config-yaml generation, event
 mapping, volume clamping, ffmpeg args, panel and link-portal status/HTML
 rendering, the slash-command schema, per-index config derivation, the
-user→index registry assignment, and link-portal token expiry.
+user→index registry assignment, link-portal token expiry, and the per-user
+channel-status preference store.
 
 ## Notes & gotchas
 

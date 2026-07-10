@@ -107,8 +107,10 @@ test("renderLinkForm: omits the error block when there's no error", () => {
 
 test("renderStatusPage: shows the current track when playing", () => {
   const html = renderStatusPage({
+    token: "tok123",
     deviceName: "Andrzej #1",
     track: { name: "Hyperdrive", artists: "Voyager", album: "Deep Space", cover: null },
+    channelStatusMode: "off",
   });
   assert.ok(html.includes("Hyperdrive"));
   assert.ok(html.includes("Voyager"));
@@ -116,15 +118,30 @@ test("renderStatusPage: shows the current track when playing", () => {
 });
 
 test("renderStatusPage: falls back to an idle message with no track", () => {
-  const html = renderStatusPage({ deviceName: "Andrzej #1", track: null });
+  const html = renderStatusPage({ token: "t", deviceName: "Andrzej #1", track: null, channelStatusMode: "off" });
   assert.ok(html.includes("Nic teraz nie gra"));
 });
 
 test("renderStatusPage: escapes a hostile track name", () => {
   const html = renderStatusPage({
+    token: "t",
     deviceName: "Andrzej",
     track: { name: `<img src=x onerror=alert(1)>`, artists: "A", album: "", cover: null },
+    channelStatusMode: "off",
   });
   assert.ok(!html.includes("<img src=x"));
   assert.ok(html.includes("&lt;img src=x"));
+});
+
+test("renderStatusPage: renders the mode form pointed at this token, with the current mode checked", () => {
+  const html = renderStatusPage({ token: "tok123", deviceName: "Andrzej", track: null, channelStatusMode: "lyrics" });
+  assert.ok(html.includes('action="/link/tok123/mode"'));
+  assert.ok(html.includes('name="mode"'));
+  assert.ok(html.includes('value="off"'));
+  assert.ok(html.includes('value="song"'));
+  assert.ok(html.includes('value="lyrics"'));
+  // Only the current mode's radio is checked.
+  assert.match(html, /value="lyrics"[^>]*checked/);
+  assert.doesNotMatch(html, /value="off"[^>]*checked/);
+  assert.doesNotMatch(html, /value="song"[^>]*checked/);
 });

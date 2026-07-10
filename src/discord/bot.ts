@@ -3,6 +3,7 @@ import {
   GatewayIntentBits,
   EmbedBuilder,
   ChannelType,
+  Routes,
   type ChatInputCommandInteraction,
   type GuildMember,
   type TextBasedChannel,
@@ -21,6 +22,7 @@ import { config } from "../config.js";
 import type { TrackMetadata } from "../librespot.js";
 import { createDingResource, type PlayerPool, type PlayerSlot } from "../pool.js";
 import type { LinkPortal } from "../linkPortal.js";
+import type { ChannelStatusMode } from "../channelStatusPrefs.js";
 import {
   fetchLyrics,
   renderKaraoke,
@@ -28,6 +30,23 @@ import {
   type LrcLine,
   type LyricsResult,
 } from "../lyrics.js";
+
+/** How often to re-check the current lyric line for the "lyrics" channel-status mode. */
+const STATUS_LYRICS_TICK_MS = 2_000;
+/** Minimum time between actual Discord voice-status API calls (that endpoint
+ *  is rate-limited; this also keeps a fast-scrolling song from spamming it). */
+const STATUS_LYRICS_MIN_PUSH_INTERVAL_MS = 8_000;
+/** Discord's voice-status field caps at 500 chars; keep ours well short of that. */
+const STATUS_TEXT_MAX_LEN = 100;
+
+/** Tracks the live lyric line fed into a slot's voice-channel status. */
+interface StatusLyricsTracker {
+  trackUri: string;
+  channelId: string;
+  lines: LrcLine[];
+  lastPushedIndex: number;
+  lastPushedAt: number;
+}
 
 /** One guild streaming from an allocated player slot. */
 interface GuildSession {
@@ -74,6 +93,11 @@ export class DiscordBot {
   private readonly sessions = new Map<string, GuildSession>();
   /** Active karaoke boards, keyed by player-slot index. */
   private readonly karaoke = new Map<number, KaraokeSession>();
+  /** Live lyric-line trackers driving "lyrics" mode channel statuses, keyed by slot index. */
+  private readonly statusLyrics = new Map<number, StatusLyricsTracker>();
+  /** Slot indices whose voice-channel status we've actually set (so we know to clear it). */
+  private readonly statusOwned = new Set<number>();
+  private readonly statusTickTimer: NodeJS.Timeout;
 
   constructor(
     private readonly pool: PlayerPool,
@@ -90,8 +114,16 @@ export class DiscordBot {
       slot.on("track", (track: TrackMetadata) => {
         void this.announceNowPlaying(slot, track);
         void this.refreshKaraoke(slot, track);
+        void this.updateChannelStatus(slot, track);
       });
     });
+    // A mode toggled from the link portal should apply immediately if that
+    // user is already streaming, not wait for their next track change.
+    this.pool.on("channelStatusModeChanged", (userId: string) => {
+      const slot = this.pool.slotForUser(userId);
+      if (slot) void this.updateChannelStatus(slot, slot.getTrack());
+    });
+    this.statusTickTimer = setInterval(() => this.tickAllStatusLyrics(), STATUS_LYRICS_TICK_MS);
 
     this.wireDiscordEvents();
   }
@@ -105,6 +137,8 @@ export class DiscordBot {
     this.sessions.clear();
     for (const k of this.karaoke.values()) clearInterval(k.timer);
     this.karaoke.clear();
+    clearInterval(this.statusTickTimer);
+    this.statusLyrics.clear();
     await this.client.destroy();
   }
 
@@ -316,6 +350,7 @@ export class DiscordBot {
         const active = this.sessions.get(guildId);
         if (active?.connection === connection) {
           this.stopKaraoke(active.slot.index);
+          this.clearChannelStatus(active.slot.index, connection.joinConfig.channelId);
           this.sessions.delete(guildId);
           void this.pool.release(active.userId);
         }
@@ -454,6 +489,7 @@ export class DiscordBot {
       this.sessions.delete(guildId);
     }
     this.stopKaraoke(slot.index);
+    this.clearChannelStatus(slot.index, session?.connection.joinConfig.channelId ?? null);
     await this.pool.release(userId);
     await interaction.reply({ content: "👋 Left voice.", ephemeral: true });
   }
@@ -620,6 +656,112 @@ export class DiscordBot {
     if (!session) return;
     clearInterval(session.timer);
     this.karaoke.delete(slotIndex);
+  }
+
+  // ── Voice channel status (song name / live lyrics) ──────────────────────
+
+  /**
+   * Apply `slot`'s owner's channel-status preference for the guild it's
+   * currently streaming into. Called on every track change and whenever the
+   * preference itself is toggled from the link portal.
+   */
+  private async updateChannelStatus(slot: PlayerSlot, track: TrackMetadata | null): Promise<void> {
+    const guildId = slot.activeGuildId;
+    const channelId = guildId ? this.sessions.get(guildId)?.connection.joinConfig.channelId : null;
+    if (!channelId) return;
+
+    const mode: ChannelStatusMode = slot.assignedUserId
+      ? this.pool.getChannelStatusMode(slot.assignedUserId)
+      : "off";
+
+    if (mode === "off") {
+      this.statusLyrics.delete(slot.index);
+      if (this.statusOwned.has(slot.index)) await this.pushChannelStatus(slot.index, channelId, null);
+      return;
+    }
+    if (!track) return; // nothing playing yet — leave whatever's there (or nothing)
+
+    if (mode === "song") {
+      this.statusLyrics.delete(slot.index);
+      await this.pushChannelStatus(slot.index, channelId, this.songStatusText(track));
+      return;
+    }
+
+    await this.startStatusLyrics(slot, channelId, track);
+  }
+
+  /** Begin (or restart, on a track change) live-lyric tracking for "lyrics" mode. */
+  private async startStatusLyrics(slot: PlayerSlot, channelId: string, track: TrackMetadata): Promise<void> {
+    const artists = track.artist_names?.join(", ") || "";
+    const title = track.name || "";
+    const result = await fetchLyrics({
+      artist: artists,
+      title,
+      album: track.album_name || undefined,
+      durationSec: track.duration ? Math.round(track.duration / 1000) : undefined,
+    });
+
+    // The track (or the preference) may have moved on while we were fetching.
+    if (slot.getTrack()?.uri !== track.uri) return;
+    if ((slot.assignedUserId ? this.pool.getChannelStatusMode(slot.assignedUserId) : "off") !== "lyrics") return;
+
+    if (!result?.lines?.length) {
+      // No synced lyrics for this track — fall back to the song name.
+      this.statusLyrics.delete(slot.index);
+      await this.pushChannelStatus(slot.index, channelId, this.songStatusText(track));
+      return;
+    }
+
+    this.statusLyrics.set(slot.index, {
+      trackUri: track.uri,
+      channelId,
+      lines: result.lines,
+      lastPushedIndex: -2,
+      lastPushedAt: 0,
+    });
+  }
+
+  /** Push the current line for every tracked "lyrics"-mode slot, throttled per slot. */
+  private tickAllStatusLyrics(): void {
+    const now = Date.now();
+    for (const [slotIndex, tracker] of this.statusLyrics) {
+      const slot = this.pool.get(slotIndex);
+      if (!slot || slot.getTrack()?.uri !== tracker.trackUri) {
+        this.statusLyrics.delete(slotIndex);
+        continue;
+      }
+      const idx = currentLineIndex(tracker.lines, slot.estimatedPositionMs() - config.karaoke.syncOffsetMs);
+      if (idx === tracker.lastPushedIndex) continue;
+      if (now - tracker.lastPushedAt < STATUS_LYRICS_MIN_PUSH_INTERVAL_MS) continue;
+      tracker.lastPushedIndex = idx;
+      tracker.lastPushedAt = now;
+      const line = idx >= 0 ? tracker.lines[idx]?.text : undefined;
+      void this.pushChannelStatus(slotIndex, tracker.channelId, line ? `🎤 ${line}` : null);
+    }
+  }
+
+  /** `🎵 Artist — Title`, truncated to keep the channel list tidy. */
+  private songStatusText(track: TrackMetadata): string {
+    const artists = track.artist_names?.join(", ") || "Unknown artist";
+    const title = track.name || "Unknown track";
+    const text = `🎵 ${artists} — ${title}`;
+    return text.length > STATUS_TEXT_MAX_LEN ? `${text.slice(0, STATUS_TEXT_MAX_LEN - 1)}…` : text;
+  }
+
+  /** Clear a slot's channel status on teardown (/leave, disconnect), if we'd set one. */
+  private clearChannelStatus(slotIndex: number, channelId: string | null): void {
+    this.statusLyrics.delete(slotIndex);
+    if (channelId && this.statusOwned.has(slotIndex)) void this.pushChannelStatus(slotIndex, channelId, null);
+  }
+
+  private async pushChannelStatus(slotIndex: number, channelId: string, status: string | null): Promise<void> {
+    if (status) this.statusOwned.add(slotIndex);
+    else this.statusOwned.delete(slotIndex);
+    try {
+      await this.client.rest.put(Routes.channelVoiceStatus(channelId), { body: { status } });
+    } catch (err) {
+      console.warn(`[discord] couldn't set channel status: ${(err as Error).message}`);
+    }
   }
 
   private karaokeEmbed(

@@ -15,6 +15,14 @@ import { STATE_BASE_DIR, librespotSlot, type LibrespotSlot } from "./config.js";
 import { AudioBridge } from "./audio.js";
 import { LibrespotManager, hasStoredCredentials, clampVolumePercent, type TrackMetadata } from "./librespot.js";
 import { assignSlot, loadRegistry, saveRegistry, type WorkerRegistry } from "./registry.js";
+import {
+  getChannelStatusMode as getMode,
+  setChannelStatusMode as setMode,
+  loadChannelStatusPrefs,
+  saveChannelStatusPrefs,
+  type ChannelStatusMode,
+  type ChannelStatusPrefs,
+} from "./channelStatusPrefs.js";
 
 /**
  * One independent player: a dedicated go-librespot instance (its own Spotify
@@ -301,11 +309,16 @@ export function createDingResource(): AudioResource {
  */
 export class PlayerPool extends EventEmitter {
   private registry: WorkerRegistry;
+  private channelStatusPrefs: ChannelStatusPrefs;
   private readonly active = new Map<number, PlayerSlot>();
 
-  constructor(private readonly registryPath: string = resolve(STATE_BASE_DIR, "registry.json")) {
+  constructor(
+    private readonly registryPath: string = resolve(STATE_BASE_DIR, "registry.json"),
+    private readonly channelStatusPrefsPath: string = resolve(STATE_BASE_DIR, "channel-status.json"),
+  ) {
     super();
     this.registry = loadRegistry(registryPath);
+    this.channelStatusPrefs = loadChannelStatusPrefs(channelStatusPrefsPath);
   }
 
   /** Number of players currently running (linked/joined right now). */
@@ -373,5 +386,22 @@ export class PlayerPool extends EventEmitter {
     this.active.delete(index);
     slot.activeGuildId = null;
     await slot.stop();
+  }
+
+  /** What `userId` wants shown as their voice channel's status ("off" by default). */
+  getChannelStatusMode(userId: string): ChannelStatusMode {
+    return getMode(this.channelStatusPrefs, userId);
+  }
+
+  /**
+   * Set `userId`'s channel-status preference, persisting it and emitting
+   * `channelStatusModeChanged` so the Discord layer can apply it immediately
+   * if that user is currently streaming, rather than waiting for their next
+   * track change.
+   */
+  setChannelStatusMode(userId: string, mode: ChannelStatusMode): void {
+    this.channelStatusPrefs = setMode(this.channelStatusPrefs, userId, mode);
+    saveChannelStatusPrefs(this.channelStatusPrefs, this.channelStatusPrefsPath);
+    this.emit("channelStatusModeChanged", userId, mode);
   }
 }

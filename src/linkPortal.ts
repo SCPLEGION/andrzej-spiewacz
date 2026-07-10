@@ -4,6 +4,7 @@ import { config } from "./config.js";
 import { extractAuthCode } from "./librespot.js";
 import { escapeHtml, toTrackView, type TrackView } from "./panel.js";
 import type { PlayerPool } from "./pool.js";
+import type { ChannelStatusMode } from "./channelStatusPrefs.js";
 
 /** How long a /link session stays valid, whether or not it's finished. */
 const SESSION_TTL_MS = 30 * 60 * 1000;
@@ -87,6 +88,9 @@ function pageShell(title: string, deviceName: string, body: string): string {
   .muted { color: var(--dim); font-size: 13px; }
   .err { color: var(--amber); margin: 12px 0; }
   .ok { color: var(--green); font-size: 16px; margin: 0 0 8px; }
+  .modes { margin: 18px 0; padding-top: 16px; border-top: 1px solid var(--line); }
+  .modes label { display: block; margin: 8px 0; cursor: pointer; }
+  .modes input[type=radio] { margin-right: 8px; }
 </style>
 </head>
 <body><div class="wrap"><h1>${escapeHtml(deviceName)} // LINK</h1><div class="card">${body}</div></div></body>
@@ -128,15 +132,42 @@ export function renderLinkForm(opts: {
   `);
 }
 
+const MODE_LABELS: Record<ChannelStatusMode, string> = {
+  off: "Wyłączony",
+  song: "Nazwa piosenki",
+  lyrics: "Teksty na żywo (karaoke)",
+};
+
 /** Shown once the account is linked — a small, user-scoped status view. */
-export function renderStatusPage(opts: { deviceName: string; track: TrackView | null }): string {
+export function renderStatusPage(opts: {
+  token: string;
+  deviceName: string;
+  track: TrackView | null;
+  channelStatusMode: ChannelStatusMode;
+}): string {
   const now = opts.track
     ? `<p><b>${escapeHtml(opts.track.name)}</b><br/><span class="muted">${escapeHtml(opts.track.artists)}</span></p>`
     : `<p class="muted">Nic teraz nie gra.</p>`;
+  const modeInputs = (Object.keys(MODE_LABELS) as ChannelStatusMode[])
+    .map(
+      (mode) => `
+      <label>
+        <input type="radio" name="mode" value="${mode}" ${mode === opts.channelStatusMode ? "checked" : ""}
+          onchange="this.form.requestSubmit()" />
+        ${escapeHtml(MODE_LABELS[mode])}
+      </label>`,
+    )
+    .join("");
   return pageShell("Linked", opts.deviceName, `
     <p class="ok">✅ Zalinkowano!</p>
     <p>Wybierz <b>${escapeHtml(opts.deviceName)}</b> w Spotify → Urządzenia i wciśnij play.</p>
     ${now}
+    <div class="modes">
+      <p class="muted">Status Twojego kanału głosowego podczas grania:</p>
+      <form method="POST" action="/link/${encodeURIComponent(opts.token)}/mode">
+        ${modeInputs}
+      </form>
+    </div>
   `);
 }
 
@@ -220,6 +251,16 @@ export class LinkPortal {
 
   private async handle(req: IncomingMessage, res: ServerResponse): Promise<void> {
     const url = new URL(req.url ?? "/", "http://localhost");
+    const modeMatch = url.pathname.match(/^\/link\/([^/]+)\/mode$/);
+    if (modeMatch?.[1]) {
+      if (req.method !== "POST") {
+        res.writeHead(405, { "content-type": "text/plain" });
+        res.end("method not allowed");
+        return;
+      }
+      return this.handleSetMode(decodeURIComponent(modeMatch[1]), req, res);
+    }
+
     const match = url.pathname.match(/^\/link\/([^/]+)$/);
     if (!match?.[1]) {
       res.writeHead(404, { "content-type": "text/plain" });
@@ -240,11 +281,7 @@ export class LinkPortal {
 
     const slot = this.pool.slotForUser(session.userId);
     if (slot?.isAuthenticated()) {
-      return this.sendHtml(
-        res,
-        200,
-        renderStatusPage({ deviceName: slot.deviceName, track: toTrackView(slot.getTrack()) }),
-      );
+      return this.sendHtml(res, 200, this.statusPageFor(token, session.userId, slot));
     }
     return this.sendHtml(
       res,
@@ -255,6 +292,37 @@ export class LinkPortal {
         deviceName: slot?.deviceName ?? config.librespot.deviceName,
       }),
     );
+  }
+
+  /** Set `userId`'s channel-status preference and re-render their status page. */
+  private async handleSetMode(token: string, req: IncomingMessage, res: ServerResponse): Promise<void> {
+    const session = this.sessions.get(token, Date.now());
+    if (!session) return this.sendHtml(res, 404, renderExpiredPage(config.librespot.deviceName));
+
+    let body: string;
+    try {
+      body = await readBody(req, 1024);
+    } catch {
+      res.writeHead(413, { "content-type": "text/plain" });
+      res.end("payload too large");
+      return;
+    }
+    const raw = new URLSearchParams(body).get("mode");
+    const mode: ChannelStatusMode = raw === "song" || raw === "lyrics" ? raw : "off";
+    this.pool.setChannelStatusMode(session.userId, mode);
+
+    const slot = this.pool.slotForUser(session.userId);
+    return this.sendHtml(res, 200, this.statusPageFor(token, session.userId, slot));
+  }
+
+  /** Assemble the status page for `userId`, reading their current mode from the pool. */
+  private statusPageFor(token: string, userId: string, slot: ReturnType<PlayerPool["slotForUser"]>): string {
+    return renderStatusPage({
+      token,
+      deviceName: slot?.deviceName ?? config.librespot.deviceName,
+      track: toTrackView(slot?.getTrack() ?? null),
+      channelStatusMode: this.pool.getChannelStatusMode(userId),
+    });
   }
 
   private async handlePost(token: string, req: IncomingMessage, res: ServerResponse): Promise<void> {
@@ -299,11 +367,7 @@ export class LinkPortal {
 
     if (!slot.isAwaitingCode()) {
       if (slot.isAuthenticated()) {
-        return this.sendHtml(
-          res,
-          200,
-          renderStatusPage({ deviceName: slot.deviceName, track: toTrackView(slot.getTrack()) }),
-        );
+        return this.sendHtml(res, 200, this.statusPageFor(token, session.userId, slot));
       }
       return this.sendHtml(
         res,
@@ -331,11 +395,7 @@ export class LinkPortal {
         }),
       );
     }
-    return this.sendHtml(
-      res,
-      200,
-      renderStatusPage({ deviceName: slot.deviceName, track: toTrackView(slot.getTrack()) }),
-    );
+    return this.sendHtml(res, 200, this.statusPageFor(token, session.userId, slot));
   }
 
   private sendHtml(res: ServerResponse, status: number, html: string): void {
