@@ -9,6 +9,8 @@ test("registers the expected command set", () => {
     "device",
     "join",
     "leave",
+    "link",
+    "lyrics",
     "np",
     "playpause",
     "prev",

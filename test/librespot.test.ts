@@ -5,8 +5,10 @@ import {
   buildConfigYaml,
   mapFrameToEvent,
   extractAuthUrl,
+  extractAuthCode,
   clampVolumePercent,
   hasCredentialsData,
+  isConnectionRefused,
 } from "../src/librespot.js";
 
 const base = {
@@ -44,6 +46,17 @@ test("buildConfigYaml: shared keys always present", () => {
     assert.match(yaml, /audio_output_pipe_format: s16le/);
     assert.match(yaml, /bitrate: 320/);
     assert.match(yaml, /port: 3678/);
+  }
+});
+
+test("buildConfigYaml: external_volume is enabled so gain is applied Discord-side", () => {
+  for (const mode of ["interactive", "zeroconf"] as const) {
+    const yaml = buildConfigYaml({ ...base, authMode: mode });
+    assert.match(yaml, /external_volume: true/);
+    // Pinned so /player/volume is 0..100 and the echoed volume event reports
+    // max:100, not the daemon's internal 65535 scale.
+    assert.match(yaml, /volume_steps: 100/);
+    assert.match(yaml, /initial_volume: 100/);
   }
 });
 
@@ -85,6 +98,25 @@ test("extractAuthUrl: returns null when no link present", () => {
   assert.equal(extractAuthUrl(""), null);
 });
 
+test("extractAuthCode: pulls the code from a full redirect URL", () => {
+  assert.equal(
+    extractAuthCode("http://127.0.0.1:38080/login?code=AQD3xZ_abc-123&state=xyz"),
+    "AQD3xZ_abc-123",
+  );
+  assert.equal(extractAuthCode("  http://127.0.0.1:38080/login?code=ONLYCODE  "), "ONLYCODE");
+});
+
+test("extractAuthCode: accepts a bare pasted code", () => {
+  assert.equal(extractAuthCode("AQD3xZ_abcdef123456"), "AQD3xZ_abcdef123456");
+});
+
+test("extractAuthCode: rejects junk and too-short input", () => {
+  assert.equal(extractAuthCode(""), null);
+  assert.equal(extractAuthCode("short"), null);
+  assert.equal(extractAuthCode("has spaces in it"), null);
+  assert.equal(extractAuthCode("https://accounts.spotify.com/authorize?foo=bar"), null);
+});
+
 test("clampVolumePercent: clamps and rounds to 0..100 integers", () => {
   assert.equal(clampVolumePercent(-5), 0);
   assert.equal(clampVolumePercent(150), 100);
@@ -92,6 +124,18 @@ test("clampVolumePercent: clamps and rounds to 0..100 integers", () => {
   assert.equal(clampVolumePercent(33.6), 34);
   assert.equal(clampVolumePercent(0), 0);
   assert.equal(clampVolumePercent(100), 100);
+});
+
+test("isConnectionRefused: detects a not-yet-bound callback (fetch cause code)", () => {
+  // Node's fetch wraps the OS error under `cause`.
+  assert.equal(isConnectionRefused({ cause: { code: "ECONNREFUSED" } }), true);
+  assert.equal(isConnectionRefused({ cause: { code: "ECONNRESET" } }), true);
+  // Some paths surface the code directly.
+  assert.equal(isConnectionRefused({ code: "ECONNREFUSED" }), true);
+  // A real HTTP error or anything else is terminal, not a retry.
+  assert.equal(isConnectionRefused(new Error("auth callback responded 400")), false);
+  assert.equal(isConnectionRefused({ cause: { code: "ETIMEDOUT" } }), false);
+  assert.equal(isConnectionRefused(null), false);
 });
 
 test("hasCredentialsData: detects persisted credentials", () => {

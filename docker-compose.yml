@@ -1,0 +1,21 @@
+services:
+  andrzej:
+    build: .
+    container_name: andrzej-spiewacz
+    restart: unless-stopped
+
+    env_file:
+      - .env
+
+    volumes:
+      - ./state:/app/state
+      - ./bin:/app/bin
+
+    ports:
+      - "8077:8077"
+      # Link portal — point your reverse proxy (e.g. spiewacz.scplegion.ovh) at
+      # this port; it's what /link sends users to instead of /code.
+      - "8078:8078"
+      # go-librespot's OAuth callback ports (38080+, one per linked user) are
+      # loopback-only — the bot process calls its own child daemons on them
+      # from inside the container, so they never need to be published here.

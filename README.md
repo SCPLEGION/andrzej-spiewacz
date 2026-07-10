@@ -12,26 +12,32 @@ Spotify's servers. Nothing here is cracked.
 ## How it works
 
 ```
-Spotify app ──(Spotify Connect)──▶ go-librespot daemon
-                                        │ raw PCM (s16le 44.1 kHz) → named pipe (FIFO)
-                                        ▼
-                                   ffmpeg (resample → 48 kHz)
-                                        ▼
-                              one shared @discordjs/voice player
-                              ├──▶ guild A voice channel
-                              ├──▶ guild B voice channel   (broadcast to all
-                              └──▶ guild C voice channel    joined guilds at once)
-go-librespot /events (WebSocket) ──▶ bot posts "now playing" embeds + web panel
+/link (user A) ──▶ go-librespot (account A) → FIFO → ffmpeg → AudioPlayer ──▶ guild voice
+/link (user B) ──▶ go-librespot (account B) → FIFO → ffmpeg → AudioPlayer ──▶ guild voice
+go-librespot /events (WebSocket) ──▶ "now playing" embeds + web panel
 ```
 
-The Node process supervises go-librespot, bridges its PCM pipe into Discord, and
-proxies a few transport controls to the daemon's HTTP API.
+The Node process supervises a **player per Discord user**, bridges each one's
+PCM pipe into Discord, and proxies transport controls to each daemon's HTTP API.
 
-**Multiple guilds at once.** There is exactly one Spotify Connect device (one
-Premium stream), so that single audio stream is broadcast to every guild that
-ran `/join` — each guild's voice connection subscribes to one shared audio
-player. Run `/join` in as many servers as you like; they all hear the same
-music in sync. `/leave` detaches just that guild.
+**One independent player per person.** Spotify allows only one simultaneous
+stream per Premium account, so every Discord user who links their own account
+gets their own go-librespot instance, showing up as its own Connect device
+(`Andrzej Śpiewacz #1`, `#2`, …). The first time someone runs `/link` (or
+`/join`), the bot permanently assigns them the next device number and stores it
+in `state/registry.json` — that mapping, and their Spotify credentials, live
+forever, but the go-librespot daemon itself only *runs* while they're actively
+linked in: `/join` spins it up (loading their already-stored token straight from
+disk), `/leave` shuts it back down. There's no player-count limit to configure —
+capacity is just "however many people are currently listening," not a fixed pool.
+Different people can stream **different music at the same time**, each with
+their own volume and transport.
+
+**Volume is applied on the Discord side.** go-librespot runs with
+`external_volume`, so it emits full-scale PCM and only *reports* the target
+volume; the bot applies the gain inline right before encoding. A `/volume`
+change (or a move of the Spotify app slider) takes effect on the next ~20 ms
+frame instead of waiting for the FIFO + ffmpeg buffer to drain.
 
 ## Setup
 
@@ -64,76 +70,108 @@ music in sync. `/leave` detaches just that guild.
    npm run register
    ```
 
-6. **Authenticate with Spotify** (one-time OAuth):
-   ```bash
-   npm run login
-   ```
-   This prints an authorization URL. Open it, log in with your Premium account,
-   and approve. Credentials are saved to `state/state.json`; after this the
-   device works from **any network** and you never need to log in again (unless
-   you delete `state/`). See [Remote access](#remote-access-any-network) if the
-   host is headless.
-
-7. **Run**:
+6. **Run**:
    ```bash
    npm run dev     # watch mode (tsx)
    # or
    npm run build && npm start
    ```
-   `npm run dev` will also prompt for login on first run if you skipped step 6.
+   There's no separate login step — the bot starts with zero players running.
+   Spotify auth happens per-person: each user runs `/link` in Discord and gets
+   a one-time link to the [link portal](#link-portal) to finish it. See
+   [Remote access](#remote-access-any-network) if the host is headless.
 
 ## Using it
 
-1. In Discord, join a voice channel and run `/join` — repeat in any other
-   servers/channels you want to stream to simultaneously.
-2. In the Spotify app, open the **Devices** menu and pick the device named by
-   `LIBRESPOT_DEVICE_NAME` (default *Andrzej Śpiewacz*).
-3. Press play. Audio plays in every joined voice channel at once; the bot posts a
-   now-playing embed in each on track change.
+1. In Discord, join a voice channel and run `/link` (first time) or `/join`
+   (already linked). The bot brings up your personal player and tells you its
+   device name (e.g. *Andrzej Śpiewacz #2*).
+2. In the Spotify app, open the **Devices** menu and pick **that** device.
+3. Press play. Audio plays in your voice channel; the bot posts a now-playing
+   embed on each track change. Other people can `/link`/`/join` and play their
+   own music on their own player at the same time.
 
 ### Commands
 
 | Command | Action |
 |---|---|
-| `/join` | Join your voice channel and start streaming |
-| `/leave` | Disconnect from voice |
-| `/np` | Show the current track |
-| `/playpause` `/skip` `/prev` | Transport control |
-| `/volume <0–100>` | Set Spotify volume |
+| `/link` | Connect your Spotify account and join your voice channel (sends you a link portal URL) |
+| `/join` | Join your voice channel on your already-linked player |
+| `/leave` | Disconnect and stop your player |
+| `/np` | Show the current track on your player |
+| `/playpause` `/skip` `/prev` | Transport control (your player) |
+| `/volume <0–100>` | Set your player's volume (instant, Discord-side) |
 | `/device` | Instructions for selecting the speaker in Spotify |
+
+All transport/volume commands act on the player linked to *you*, the caller —
+run `/link` (or `/join`) first.
 
 ## Remote access (any network)
 
-By default `LIBRESPOT_AUTH=interactive`: after the one-time `npm run login`, the
-daemon connects **directly to Spotify's servers** using the stored credentials,
-so the speaker shows up in your Spotify app from any network — phone on mobile
-data, work laptop, wherever. No mDNS, no same-LAN requirement.
+By default `LIBRESPOT_AUTH=interactive`: once a user's daemon has stored
+credentials, it connects **directly to Spotify's servers**, so their speaker
+shows up in the Spotify app from any network — phone on mobile data, work
+laptop, wherever. No mDNS, no same-LAN requirement.
 
-**Headless host?** The OAuth redirect goes to `http://127.0.0.1:<callback_port>/login`
-on the *bot's* machine, so the browser completing the login must be able to reach
-that loopback. Two ways:
-
-- **SSH tunnel** (run the link locally, auth lands on the server):
-  ```bash
-  ssh -L 38080:127.0.0.1:38080 user@your-server
-  # then on the server: npm run login
-  # open the printed http://127.0.0.1:38080/... link in your LOCAL browser
-  ```
-- **Log in locally, copy the state** — run `npm run login` on your laptop, then
-  copy the resulting `state/state.json` to the server's `state/` directory.
+**Headless host?** During `/link`, go-librespot's OAuth redirect points at
+`http://127.0.0.1:<callback_port>/login` on the *bot's* machine — that's why the
+[link portal](#link-portal) page says the browser tab "won't load" after you
+approve: Spotify redirects the user's own browser there, and on a remote host
+that loopback isn't the user's machine. The address bar still contains the
+`code=...` needed, though — the portal has you paste the whole URL into a form
+instead of a Discord command, and submits it to the bot's own local callback
+for you. Nobody needs to SSH-tunnel anything for this; the callback port is
+only ever hit by the bot process itself, never exposed externally (so it
+doesn't need to be published in `docker-compose.yml` either, unlike the panel
+and link-portal ports).
 
 To go back to LAN-only mDNS discovery instead, set `LIBRESPOT_AUTH=zeroconf`.
+
+## Link portal
+
+`/link` doesn't paste raw OAuth links into Discord — it sends each user a
+one-time link to a small public web page (`LINK_PORTAL_BASE_URL`, e.g.
+`https://spiewacz.scplegion.ovh`) that replaces the old `/code` command:
+
+1. **Autoryzuj Spotify** button → the same authorize URL `/link` used to post
+   directly into Discord.
+2. A box to paste the broken `127.0.0.1...` redirect URL the browser lands on
+   after approving — submitting it finishes the login (what `/code` used to do).
+3. Once linked, the same page flips to a tiny status view: device name and
+   whatever's currently playing. Nothing else — no other user's data is ever
+   shown here, unlike the admin control panel below.
+
+The link is a random, unguessable token good for 30 minutes, sent only in an
+**ephemeral** Discord reply (visible to the caller alone) — there's no login
+system on the site itself; possession of the link is the auth, the same trust
+model as an emailed magic link. Running `/link` again invalidates whatever link
+was pending before.
+
+**This is meant to sit behind your own reverse proxy** (nginx/Caddy/Traefik) —
+the app itself just listens on plain HTTP (`LINK_PORTAL_HOST=0.0.0.0`,
+`LINK_PORTAL_PORT=8078` by default; `docker-compose.yml` publishes `8078`).
+Point your proxy's TLS-terminated vhost at that port and set
+`LINK_PORTAL_BASE_URL` to the public HTTPS origin. Set
+`LINK_PORTAL_ENABLED=false` to turn the whole thing off (`/link` will then
+refuse to run, since it has no other way to finish OAuth).
 
 ## Control panel
 
 A small web dashboard ships with the bot (enabled by default,
-`http://127.0.0.1:8077`). It's a dark/terminal-styled page that shows, live:
+`http://127.0.0.1:8077`). It's a dark/terminal-styled page that shows, live,
+one card per **currently running** player:
 
-- **Auth status** — and, while unauthenticated, a one-click **Authorize Spotify**
-  button pointing at the OAuth link the daemon emits. This is the nicest way to
-  do the first-time login: start the bot, open the panel, click the button.
+- **Device name, auth status, and which guild is using it.**
+- **Auth status** — and, while a player is unauthenticated, a one-click
+  **Authorize Spotify** button pointing at its OAuth link. This is the nicest
+  way to link an account: run `/link`, open the panel, click.
 - **Now playing** — cover art, track, artist, album.
-- **Streaming to N guild(s)** — every server currently receiving the stream.
+- **🔔 Test Audio** — plays a short ding through a player's voice channel so you
+  can confirm the Discord voice pipeline works end-to-end (enabled once that
+  player has `/join`ed a channel).
+
+Players that have never linked, or that are currently `/leave`d, don't have a
+card — there's no fixed roster to show idle slots for.
 
 It polls `/api/status` (also available as raw JSON) every 2s. Configure with
 `PANEL_HOST` / `PANEL_PORT`, or disable with `PANEL_ENABLED=false`. It binds to
@@ -148,21 +186,38 @@ npm run typecheck
 ```
 
 Tests live in `test/` and cover the pure logic — config-yaml generation, event
-mapping, volume clamping, ffmpeg args, panel status/HTML rendering, and the
-slash-command schema.
+mapping, volume clamping, ffmpeg args, panel and link-portal status/HTML
+rendering, the slash-command schema, per-index config derivation, the
+user→index registry assignment, and link-portal token expiry.
 
 ## Notes & gotchas
 
-- **First login** persists credentials under `state/state.json` so the daemon
-  reconnects automatically on every later start — no re-selecting the device.
-- The generated daemon config is written to `state/config.yml` on each start;
-  edit `buildConfigYaml()` in `src/librespot.ts` to change daemon settings.
-- One Spotify device = one stream, mirrored to all joined guilds in sync (you
-  can't play different songs per guild — that would need multiple Premium
-  accounts/devices).
+- **First `/link`** persists credentials under `state/<n>/state.json` (`state/`
+  itself for index 0) so that user's daemon reconnects automatically on every
+  later `/join` — no re-authorizing.
+- **`state/registry.json`** is the permanent Discord user → device-index
+  mapping. It's never rewritten once a user has an index, and it's what makes
+  `/join` recreate the *same* device for the *same* person after a restart.
+  Back it up along with `state/` if you move hosts.
+- The generated daemon config is written to each index's config dir on every
+  start; edit `buildConfigYaml()` in `src/librespot.ts` to change daemon settings.
+- One Premium account = one stream, so each linked user needs their own
+  account. Per-index API ports, callback ports, FIFOs and credential dirs are
+  auto-offset so nothing collides — there's no count to configure.
 - `state/`, `bin/`, `.env`, and the FIFO are gitignored.
 
 ## Requirements
 
 - Node ≥ 20 (tested on 25), `ffmpeg` and `mkfifo` on PATH.
-- A Spotify **Premium** account.
+- A Spotify **Premium** account (one per person who wants to stream their own music).
+
+### Running with Docker
+
+`Dockerfile`/`docker-compose.yml` build a fully self-contained image (Node,
+ffmpeg, and the build toolchain for npm's native addons all get installed
+inside it) — the **host doesn't need anything preinstalled**, which matters if
+you're running this in a bare Proxmox LXC container. One thing that's outside
+the image and only fixable on the Proxmox side: Docker itself needs the LXC's
+**nesting** feature enabled (container → *Options* → *Features* → check
+`nesting`, plus `keyctl` if Docker complains about it) — without it, Docker
+inside the LXC won't start at all.

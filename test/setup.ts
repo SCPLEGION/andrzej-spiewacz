@@ -21,6 +21,10 @@ for (const key of [
   "PANEL_ENABLED",
   "PANEL_HOST",
   "PANEL_PORT",
+  "LINK_PORTAL_ENABLED",
+  "LINK_PORTAL_HOST",
+  "LINK_PORTAL_PORT",
+  "LINK_PORTAL_BASE_URL",
   "DISCORD_GUILD_ID",
 ]) {
   delete process.env[key];
