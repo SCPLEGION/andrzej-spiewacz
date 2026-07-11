@@ -107,22 +107,42 @@ export function renderExpiredPage(deviceName: string): string {
 }
 
 /**
- * The domain's root page. There's no dashboard here (each token is a private,
- * user-scoped session) — just a fallback box to manually paste either the
- * bare token or the whole link Discord gave you, for anyone who lands on the
- * bare domain instead of clicking their /link link directly.
+ * The domain's root page: a short "what is this" description of the bot and
+ * its commands (there's no dashboard here — each /link token is a private,
+ * user-scoped session), plus a fallback box to manually paste a token/link
+ * for anyone who lands here instead of clicking their /link link directly.
  */
 export function renderHomePage(deviceName: string): string {
   return pageShell(deviceName, deviceName, `
-    <p class="muted">Ta strona nie ma nic do pokazania sama z siebie — link
-    dostajesz na Discordzie po komendzie <code>/link</code>, kliknij w niego.</p>
-    <p>Zgubiłeś link? Wklej tutaj sam token (albo cały link) i przejdź dalej:</p>
-    <form onsubmit="event.preventDefault();
-      var v = document.getElementById('tok').value.trim().split('/').filter(Boolean).pop();
-      if (v) location.href = '/link/' + encodeURIComponent(v);">
-      <input id="tok" type="text" placeholder="token albo cały link z Discorda" required autofocus />
-      <button class="btn" type="submit">Przejdź</button>
-    </form>
+    <p>Bot discordowy, który streamuje Spotify na kanał głosowy jako prawdziwe
+    urządzenie <b>Spotify Connect</b> — wybierasz je w apce Spotify jak zwykły
+    głośnik, wciskasz play, a dźwięk leci na Discordzie. Wymaga konta
+    <b>Spotify Premium</b>.</p>
+
+    <div class="step">
+      <span class="n">1.</span> Wejdź na kanał głosowy i wpisz <code>/link</code> na
+      Discordzie — dostaniesz stamtąd jednorazowy link tutaj, kończący logowanie.
+    </div>
+    <div class="step">
+      <span class="n">2.</span> W apce Spotify wybierz swoje urządzenie z listy
+      <b>Devices</b> i wciśnij play.
+    </div>
+
+    <p class="muted">Każda osoba dostaje własny, niezależny player — różni
+    ludzie mogą słuchać różnej muzyki naraz. Komendy: <code>/join</code>
+    <code>/leave</code> <code>/np</code> <code>/playpause</code> <code>/skip</code>
+    <code>/prev</code> <code>/volume</code> <code>/lyrics</code> <code>/device</code>.</p>
+
+    <div class="modes">
+      <p class="muted">Zgubiłeś link z <code>/link</code>? Wklej tutaj sam token (albo
+      cały link) i przejdź dalej:</p>
+      <form onsubmit="event.preventDefault();
+        var v = document.getElementById('tok').value.trim().split('/').filter(Boolean).pop();
+        if (v) location.href = '/link/' + encodeURIComponent(v);">
+        <input id="tok" type="text" placeholder="token albo cały link z Discorda" required autofocus />
+        <button class="btn" type="submit">Przejdź</button>
+      </form>
+    </div>
   `);
 }
 
