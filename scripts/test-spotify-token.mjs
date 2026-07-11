@@ -8,12 +8,12 @@
  * against a throwaway config dir under state/spotify-token-test/, killed and
  * deleted when this script exits.
  *
- * Usage:
- *   SPOTIFY_CLIENT_ID=... SPOTIFY_CLIENT_SECRET=... node scripts/test-spotify-token.mjs
- *     -> prints an authorize URL to open in your browser
- *   SPOTIFY_CLIENT_ID=... SPOTIFY_CLIENT_SECRET=... node scripts/test-spotify-token.mjs <code>
- *     -> exchanges the code, tries to auth go-librespot with the resulting token
+ * Usage (reads SPOTIFY_CLIENT_ID / SPOTIFY_CLIENT_SECRET / SPOTIFY_REDIRECT_URI
+ * from .env automatically — no need to export them by hand):
+ *   node scripts/test-spotify-token.mjs        -> prints an authorize URL to open in your browser
+ *   node scripts/test-spotify-token.mjs <code> -> exchanges the code, tries to auth go-librespot with it
  */
+import "dotenv/config";
 import { spawn, execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { resolve } from "node:path";
