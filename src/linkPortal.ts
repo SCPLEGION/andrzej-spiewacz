@@ -1,58 +1,18 @@
 import { createServer, type Server, type IncomingMessage, type ServerResponse } from "node:http";
-import { randomBytes } from "node:crypto";
 import { config } from "./config.js";
 import { extractAuthCode } from "./librespot.js";
 import { escapeHtml, toTrackView, type TrackView } from "./panel.js";
 import type { PlayerPool } from "./pool.js";
 import type { ChannelStatusMode } from "./channelStatusPrefs.js";
+import {
+  discordAuthorizeUrl,
+  exchangeDiscordCode,
+  fetchDiscordUser,
+  parseCookies,
+  SessionSigner,
+} from "./discordAuth.js";
 
-/** How long a /link session stays valid, whether or not it's finished. */
-const SESSION_TTL_MS = 30 * 60 * 1000;
-
-/** A pending or completed link session: one user's in-flight OAuth flow. */
-export interface LinkSession {
-  userId: string;
-  authUrl: string;
-  createdAt: number;
-}
-
-/** Cryptographically random, URL-safe token — knowledge of it IS the auth. */
-export function generateToken(): string {
-  return randomBytes(24).toString("base64url");
-}
-
-/**
- * In-memory store of link-portal sessions, one per in-flight /link. `now` is
- * threaded through every lookup so expiry is deterministically testable
- * without real sleeps. A user has at most one live session — a fresh /link
- * invalidates whatever token they had pending before.
- */
-export class LinkSessionStore {
-  private readonly byToken = new Map<string, LinkSession>();
-  private readonly byUser = new Map<string, string>();
-
-  /** Start a new session for `userId`, invalidating any previous pending one. */
-  create(userId: string, authUrl: string, now: number): string {
-    const previous = this.byUser.get(userId);
-    if (previous) this.byToken.delete(previous);
-    const token = generateToken();
-    this.byToken.set(token, { userId, authUrl, createdAt: now });
-    this.byUser.set(userId, token);
-    return token;
-  }
-
-  /** The session for `token`, or undefined if it doesn't exist or has expired. */
-  get(token: string, now: number): LinkSession | undefined {
-    const session = this.byToken.get(token);
-    if (!session) return undefined;
-    if (now - session.createdAt > SESSION_TTL_MS) {
-      this.byToken.delete(token);
-      if (this.byUser.get(session.userId) === token) this.byUser.delete(session.userId);
-      return undefined;
-    }
-    return session;
-  }
-}
+const SESSION_COOKIE = "andrzej_session";
 
 function pageShell(title: string, deviceName: string, body: string): string {
   return `<!doctype html>
@@ -91,6 +51,8 @@ function pageShell(title: string, deviceName: string, body: string): string {
   .modes { margin: 18px 0; padding-top: 16px; border-top: 1px solid var(--line); }
   .modes label { display: block; margin: 8px 0; cursor: pointer; }
   .modes input[type=radio] { margin-right: 8px; }
+  .foot { margin-top: 18px; padding-top: 14px; border-top: 1px solid var(--line); }
+  .foot a { color: var(--dim); }
 </style>
 </head>
 <body><div class="wrap"><h1>${escapeHtml(deviceName)} // LINK</h1><div class="card">${body}</div></div></body>
@@ -98,21 +60,13 @@ function pageShell(title: string, deviceName: string, body: string): string {
 `;
 }
 
-/** Shown for a missing/expired/already-consumed token. */
-export function renderExpiredPage(deviceName: string): string {
-  return pageShell("Link expired", deviceName, `
-    <p>Ten link wygasł albo jest nieprawidłowy.</p>
-    <p class="muted">Uruchom <code>/link</code> jeszcze raz na Discordzie, żeby dostać nowy.</p>
-  `);
-}
+const LOGOUT_LINK = `<div class="foot"><a href="/auth/logout">Wyloguj</a></div>`;
 
 /**
- * The domain's root page: a short "what is this" description of the bot and
- * its commands (there's no dashboard here — each /link token is a private,
- * user-scoped session), plus a fallback box to manually paste a token/link
- * for anyone who lands here instead of clicking their /link link directly.
+ * Shown to anyone not logged in: a short "what is this bot" description plus
+ * the "Login with Discord" button that starts the session.
  */
-export function renderHomePage(deviceName: string): string {
+export function renderLoginPage(deviceName: string): string {
   return pageShell(deviceName, deviceName, `
     <p>Bot discordowy, który streamuje Spotify na kanał głosowy jako prawdziwe
     urządzenie <b>Spotify Connect</b> — wybierasz je w apce Spotify jak zwykły
@@ -120,12 +74,11 @@ export function renderHomePage(deviceName: string): string {
     <b>Spotify Premium</b>.</p>
 
     <div class="step">
-      <span class="n">1.</span> Wejdź na kanał głosowy i wpisz <code>/link</code> na
-      Discordzie — dostaniesz stamtąd jednorazowy link tutaj, kończący logowanie.
+      <span class="n">1.</span> Zaloguj się tutaj przez Discord (przycisk niżej).
     </div>
     <div class="step">
-      <span class="n">2.</span> W apce Spotify wybierz swoje urządzenie z listy
-      <b>Devices</b> i wciśnij play.
+      <span class="n">2.</span> Wejdź na kanał głosowy i wpisz <code>/link</code> na
+      Discordzie, potem wróć/odśwież tę stronę żeby dokończyć logowanie do Spotify.
     </div>
 
     <p class="muted">Każda osoba dostaje własny, niezależny player — różni
@@ -133,26 +86,30 @@ export function renderHomePage(deviceName: string): string {
     <code>/leave</code> <code>/np</code> <code>/playpause</code> <code>/skip</code>
     <code>/prev</code> <code>/volume</code> <code>/lyrics</code> <code>/device</code>.</p>
 
-    <div class="modes">
-      <p class="muted">Zgubiłeś link z <code>/link</code>? Wklej tutaj sam token (albo
-      cały link) i przejdź dalej:</p>
-      <form onsubmit="event.preventDefault();
-        var v = document.getElementById('tok').value.trim().split('/').filter(Boolean).pop();
-        if (v) location.href = '/link/' + encodeURIComponent(v);">
-        <input id="tok" type="text" placeholder="token albo cały link z Discorda" required autofocus />
-        <button class="btn" type="submit">Przejdź</button>
-      </form>
-    </div>
+    <a class="btn" href="/auth/discord/login">Zaloguj przez Discord</a>
+  `);
+}
+
+/** Shown when the Discord OAuth exchange itself fails. */
+export function renderAuthErrorPage(deviceName: string, message: string): string {
+  return pageShell("Login failed", deviceName, `
+    <p class="err">Logowanie się nie powiodło: ${escapeHtml(message)}</p>
+    <a class="btn" href="/auth/discord/login">Spróbuj ponownie</a>
+  `);
+}
+
+/** Shown to a logged-in user who has never run /link (no player exists yet). */
+export function renderNoPlayerPage(deviceName: string): string {
+  return pageShell("Not linked yet", deviceName, `
+    <p>Nie masz jeszcze swojego playera.</p>
+    <p class="muted">Wejdź na kanał głosowy i wpisz <code>/link</code> na Discordzie,
+    potem odśwież tę stronę.</p>
+    ${LOGOUT_LINK}
   `);
 }
 
 /** The two-step "authorize, then paste the redirect URL" form. */
-export function renderLinkForm(opts: {
-  token: string;
-  authUrl: string;
-  deviceName: string;
-  error?: string;
-}): string {
+export function renderLinkForm(opts: { authUrl: string; deviceName: string; error?: string }): string {
   return pageShell("Link your Spotify", opts.deviceName, `
     <div class="step">
       <span class="n">1.</span> Zaloguj się do Spotify na koncie, którego chcesz użyć:<br/>
@@ -164,11 +121,12 @@ export function renderLinkForm(opts: {
       <b>cały</b> ten link i wklej go tutaj:
     </div>
     ${opts.error ? `<p class="err">${escapeHtml(opts.error)}</p>` : ""}
-    <form method="POST" action="/link/${encodeURIComponent(opts.token)}">
+    <form method="POST" action="/code">
       <input type="text" name="code" placeholder="http://127.0.0.1:.../login?code=..." required autofocus />
       <button class="btn" type="submit">Zakończ linkowanie</button>
     </form>
     <p class="muted">Po zakończeniu wybierz <b>${escapeHtml(opts.deviceName)}</b> w Spotify → Urządzenia.</p>
+    ${LOGOUT_LINK}
   `);
 }
 
@@ -180,7 +138,6 @@ const MODE_LABELS: Record<ChannelStatusMode, string> = {
 
 /** Shown once the account is linked — a small, user-scoped status view. */
 export function renderStatusPage(opts: {
-  token: string;
   deviceName: string;
   track: TrackView | null;
   channelStatusMode: ChannelStatusMode;
@@ -204,10 +161,11 @@ export function renderStatusPage(opts: {
     ${now}
     <div class="modes">
       <p class="muted">Status Twojego kanału głosowego podczas grania:</p>
-      <form method="POST" action="/link/${encodeURIComponent(opts.token)}/mode">
+      <form method="POST" action="/mode">
         ${modeInputs}
       </form>
     </div>
+    ${LOGOUT_LINK}
   `);
 }
 
@@ -232,23 +190,16 @@ function readBody(req: IncomingMessage, maxBytes: number): Promise<string> {
 }
 
 /**
- * Public web page that replaces `/code`: `/link` in Discord sends the caller a
- * one-time link here instead of the raw authorize URL. The page shows the
- * "authorize Spotify" button and a box to paste the resulting (broken,
- * 127.0.0.1) redirect URL — submitting it does what `/code` used to do. Once
- * linked, revisiting the same link shows the caller's own status.
+ * Public web page that replaces `/code`: log in with Discord (real OAuth2
+ * session, HttpOnly signed cookie — no per-user tokens to hand out anymore),
+ * then see whatever state your player is in: not linked yet, mid-login
+ * (authorize + paste the redirect URL), or your own status once linked.
  */
 export class LinkPortal {
   private server: Server | null = null;
-  private readonly sessions = new LinkSessionStore();
+  private readonly sessionSigner = new SessionSigner();
 
   constructor(private readonly pool: PlayerPool) {}
-
-  /** Begin a new link session for `userId`, returning the public URL to send them. */
-  beginSession(userId: string, authUrl: string): string {
-    const token = this.sessions.create(userId, authUrl, Date.now());
-    return `${config.linkPortal.baseUrl.replace(/\/$/, "")}/link/${token}`;
-  }
 
   start(): void {
     if (!config.linkPortal.enabled) {
@@ -257,7 +208,14 @@ export class LinkPortal {
     }
     if (!config.linkPortal.baseUrl) {
       console.warn(
-        "[link-portal] LINK_PORTAL_BASE_URL is not set, so /link can't produce a usable link. " +
+        "[link-portal] LINK_PORTAL_BASE_URL is not set, so login redirects can't work. " +
+          "Link portal is NOT running for this session.",
+      );
+      return;
+    }
+    if (!config.discord.clientSecret) {
+      console.warn(
+        "[link-portal] DISCORD_CLIENT_SECRET is not set, so 'Login with Discord' can't work. " +
           "Link portal is NOT running for this session.",
       );
       return;
@@ -289,109 +247,100 @@ export class LinkPortal {
     this.server = null;
   }
 
+  private redirectUri(): string {
+    return `${config.linkPortal.baseUrl.replace(/\/$/, "")}/auth/discord/callback`;
+  }
+
+  private sessionUserId(req: IncomingMessage): string | null {
+    return this.sessionSigner.verify(parseCookies(req.headers.cookie)[SESSION_COOKIE]);
+  }
+
+  private cookieHeader(value: string, maxAgeSeconds: number): string {
+    const secure = config.linkPortal.baseUrl.startsWith("https://") ? "; Secure" : "";
+    return `${SESSION_COOKIE}=${encodeURIComponent(value)}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${maxAgeSeconds}${secure}`;
+  }
+
+  /** Whatever state `userId`'s player is in, as the matching page. */
+  private panelHtml(userId: string, error?: string): string {
+    const slot = this.pool.slotForUser(userId);
+    if (slot?.isAuthenticated()) {
+      return renderStatusPage({
+        deviceName: slot.deviceName,
+        track: toTrackView(slot.getTrack()),
+        channelStatusMode: this.pool.getChannelStatusMode(userId),
+      });
+    }
+    const authUrl = slot?.getAuthUrl();
+    if (slot && authUrl) {
+      return renderLinkForm({ authUrl, deviceName: slot.deviceName, error });
+    }
+    return renderNoPlayerPage(config.librespot.deviceName);
+  }
+
   private async handle(req: IncomingMessage, res: ServerResponse): Promise<void> {
     const url = new URL(req.url ?? "/", "http://localhost");
+    const { pathname } = url;
 
-    if (url.pathname === "/") {
-      if (req.method !== "GET") {
-        res.writeHead(405, { "content-type": "text/plain" });
-        res.end("method not allowed");
-        return;
-      }
-      return this.sendHtml(res, 200, renderHomePage(config.librespot.deviceName));
+    if (pathname === "/" && req.method === "GET") return this.handleHome(req, res);
+    if (pathname === "/auth/discord/login" && req.method === "GET") return this.handleDiscordLogin(res);
+    if (pathname === "/auth/discord/callback" && req.method === "GET") {
+      return this.handleDiscordCallback(url, res);
     }
+    if (pathname === "/auth/logout" && req.method === "GET") return this.handleLogout(res);
+    if (pathname === "/code" && req.method === "POST") return this.handleSubmitCode(req, res);
+    if (pathname === "/mode" && req.method === "POST") return this.handleSetMode(req, res);
 
-    const modeMatch = url.pathname.match(/^\/link\/([^/]+)\/mode$/);
-    if (modeMatch?.[1]) {
-      if (req.method !== "POST") {
-        res.writeHead(405, { "content-type": "text/plain" });
-        res.end("method not allowed");
-        return;
-      }
-      return this.handleSetMode(decodeURIComponent(modeMatch[1]), req, res);
-    }
-
-    const match = url.pathname.match(/^\/link\/([^/]+)$/);
-    if (!match?.[1]) {
-      res.writeHead(404, { "content-type": "text/plain" });
-      res.end("not found");
-      return;
-    }
-    const token = decodeURIComponent(match[1]);
-
-    if (req.method === "GET") return this.handleGet(token, res);
-    if (req.method === "POST") return this.handlePost(token, req, res);
-    res.writeHead(405, { "content-type": "text/plain" });
-    res.end("method not allowed");
+    res.writeHead(404, { "content-type": "text/plain" });
+    res.end("not found");
   }
 
-  private handleGet(token: string, res: ServerResponse): void {
-    const session = this.sessions.get(token, Date.now());
-    if (!session) return this.sendHtml(res, 404, renderExpiredPage(config.librespot.deviceName));
-
-    const slot = this.pool.slotForUser(session.userId);
-    if (slot?.isAuthenticated()) {
-      return this.sendHtml(res, 200, this.statusPageFor(token, session.userId, slot));
-    }
-    return this.sendHtml(
-      res,
-      200,
-      renderLinkForm({
-        token,
-        authUrl: session.authUrl,
-        deviceName: slot?.deviceName ?? config.librespot.deviceName,
-      }),
-    );
+  private handleHome(req: IncomingMessage, res: ServerResponse): void {
+    const userId = this.sessionUserId(req);
+    if (!userId) return this.sendHtml(res, 200, renderLoginPage(config.librespot.deviceName));
+    return this.sendHtml(res, 200, this.panelHtml(userId));
   }
 
-  /** Set `userId`'s channel-status preference and re-render their status page. */
-  private async handleSetMode(token: string, req: IncomingMessage, res: ServerResponse): Promise<void> {
-    const session = this.sessions.get(token, Date.now());
-    if (!session) return this.sendHtml(res, 404, renderExpiredPage(config.librespot.deviceName));
+  private handleDiscordLogin(res: ServerResponse): void {
+    res.writeHead(302, { location: discordAuthorizeUrl(config.discord.clientId, this.redirectUri()) });
+    res.end();
+  }
 
-    let body: string;
+  private async handleDiscordCallback(url: URL, res: ServerResponse): Promise<void> {
+    const code = url.searchParams.get("code");
+    if (!code) {
+      return this.sendHtml(res, 400, renderAuthErrorPage(config.librespot.deviceName, "Brak kodu w odpowiedzi Discorda."));
+    }
     try {
-      body = await readBody(req, 1024);
-    } catch {
-      res.writeHead(413, { "content-type": "text/plain" });
-      res.end("payload too large");
+      const accessToken = await exchangeDiscordCode({
+        clientId: config.discord.clientId,
+        clientSecret: config.discord.clientSecret,
+        redirectUri: this.redirectUri(),
+        code,
+      });
+      const user = await fetchDiscordUser(accessToken);
+      res.setHeader("Set-Cookie", this.cookieHeader(this.sessionSigner.sign(user.id), 60 * 60 * 24 * 30));
+      res.writeHead(302, { location: "/" });
+      res.end();
+    } catch (err) {
+      this.sendHtml(res, 502, renderAuthErrorPage(config.librespot.deviceName, (err as Error).message));
+    }
+  }
+
+  private handleLogout(res: ServerResponse): void {
+    res.setHeader("Set-Cookie", this.cookieHeader("", 0));
+    res.writeHead(302, { location: "/" });
+    res.end();
+  }
+
+  private async handleSubmitCode(req: IncomingMessage, res: ServerResponse): Promise<void> {
+    const userId = this.sessionUserId(req);
+    if (!userId) {
+      res.writeHead(302, { location: "/" });
+      res.end();
       return;
     }
-    const raw = new URLSearchParams(body).get("mode");
-    const mode: ChannelStatusMode = raw === "song" || raw === "lyrics" ? raw : "off";
-    this.pool.setChannelStatusMode(session.userId, mode);
-
-    const slot = this.pool.slotForUser(session.userId);
-    return this.sendHtml(res, 200, this.statusPageFor(token, session.userId, slot));
-  }
-
-  /** Assemble the status page for `userId`, reading their current mode from the pool. */
-  private statusPageFor(token: string, userId: string, slot: ReturnType<PlayerPool["slotForUser"]>): string {
-    return renderStatusPage({
-      token,
-      deviceName: slot?.deviceName ?? config.librespot.deviceName,
-      track: toTrackView(slot?.getTrack() ?? null),
-      channelStatusMode: this.pool.getChannelStatusMode(userId),
-    });
-  }
-
-  private async handlePost(token: string, req: IncomingMessage, res: ServerResponse): Promise<void> {
-    const session = this.sessions.get(token, Date.now());
-    if (!session) return this.sendHtml(res, 404, renderExpiredPage(config.librespot.deviceName));
-
-    const slot = this.pool.slotForUser(session.userId);
-    if (!slot) {
-      return this.sendHtml(
-        res,
-        409,
-        renderLinkForm({
-          token,
-          authUrl: session.authUrl,
-          deviceName: config.librespot.deviceName,
-          error: "Twój odtwarzacz już nie działa — wróć na Discorda i uruchom /link ponownie.",
-        }),
-      );
-    }
+    const slot = this.pool.slotForUser(userId);
+    if (!slot) return this.sendHtml(res, 409, renderNoPlayerPage(config.librespot.deviceName));
 
     let body: string;
     try {
@@ -406,28 +355,16 @@ export class LinkPortal {
       return this.sendHtml(
         res,
         400,
-        renderLinkForm({
-          token,
-          authUrl: session.authUrl,
-          deviceName: slot.deviceName,
-          error: "Nie znalazłem code=… w tym co wkleiłeś. Wklej cały adres z paska przeglądarki.",
-        }),
+        this.panelHtml(userId, "Nie znalazłem code=… w tym co wkleiłeś. Wklej cały adres z paska przeglądarki."),
       );
     }
 
     if (!slot.isAwaitingCode()) {
-      if (slot.isAuthenticated()) {
-        return this.sendHtml(res, 200, this.statusPageFor(token, session.userId, slot));
-      }
+      if (slot.isAuthenticated()) return this.sendHtml(res, 200, this.panelHtml(userId));
       return this.sendHtml(
         res,
         409,
-        renderLinkForm({
-          token,
-          authUrl: session.authUrl,
-          deviceName: slot.deviceName,
-          error: "Nie ma teraz aktywnego logowania — wróć na Discorda i uruchom /link ponownie.",
-        }),
+        this.panelHtml(userId, "Nie ma teraz aktywnego logowania — wróć na Discorda i uruchom /link ponownie."),
       );
     }
 
@@ -437,15 +374,35 @@ export class LinkPortal {
       return this.sendHtml(
         res,
         400,
-        renderLinkForm({
-          token,
-          authUrl: session.authUrl,
-          deviceName: slot.deviceName,
-          error: `Linkowanie nie powiodło się: ${(err as Error).message}. Spróbuj kliknąć link autoryzacji jeszcze raz.`,
-        }),
+        this.panelHtml(
+          userId,
+          `Linkowanie nie powiodło się: ${(err as Error).message}. Spróbuj kliknąć link autoryzacji jeszcze raz.`,
+        ),
       );
     }
-    return this.sendHtml(res, 200, this.statusPageFor(token, session.userId, slot));
+    return this.sendHtml(res, 200, this.panelHtml(userId));
+  }
+
+  /** Set `userId`'s channel-status preference and re-render their panel. */
+  private async handleSetMode(req: IncomingMessage, res: ServerResponse): Promise<void> {
+    const userId = this.sessionUserId(req);
+    if (!userId) {
+      res.writeHead(302, { location: "/" });
+      res.end();
+      return;
+    }
+    let body: string;
+    try {
+      body = await readBody(req, 1024);
+    } catch {
+      res.writeHead(413, { "content-type": "text/plain" });
+      res.end("payload too large");
+      return;
+    }
+    const raw = new URLSearchParams(body).get("mode");
+    const mode: ChannelStatusMode = raw === "song" || raw === "lyrics" ? raw : "off";
+    this.pool.setChannelStatusMode(userId, mode);
+    return this.sendHtml(res, 200, this.panelHtml(userId));
   }
 
   private sendHtml(res: ServerResponse, status: number, html: string): void {

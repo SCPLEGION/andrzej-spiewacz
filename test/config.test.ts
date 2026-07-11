@@ -35,6 +35,7 @@ test("config: sensible defaults with only Discord creds set", () => {
   assert.equal(config.linkPortal.host, "0.0.0.0");
   assert.equal(config.linkPortal.port, 8078);
   assert.equal(config.linkPortal.baseUrl, "");
+  assert.equal(config.discord.clientSecret, "");
 });
 
 test("derived API URLs follow host/port", () => {

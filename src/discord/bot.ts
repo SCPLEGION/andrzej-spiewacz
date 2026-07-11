@@ -21,7 +21,6 @@ import {
 import { config } from "../config.js";
 import type { TrackMetadata } from "../librespot.js";
 import { createDingResource, type PlayerPool, type PlayerSlot } from "../pool.js";
-import type { LinkPortal } from "../linkPortal.js";
 import type { ChannelStatusMode } from "../channelStatusPrefs.js";
 import {
   fetchLyrics,
@@ -99,10 +98,7 @@ export class DiscordBot {
   private readonly statusOwned = new Set<number>();
   private readonly statusTickTimer: NodeJS.Timeout;
 
-  constructor(
-    private readonly pool: PlayerPool,
-    private readonly linkPortal: LinkPortal,
-  ) {
+  constructor(private readonly pool: PlayerPool) {
     this.client = new Client({
       intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildVoiceStates],
     });
@@ -414,10 +410,12 @@ export class DiscordBot {
   }
 
   private async cmdLink(interaction: ChatInputCommandInteraction): Promise<void> {
-    if (!config.linkPortal.enabled || !config.linkPortal.baseUrl) {
+    if (!config.linkPortal.enabled || !config.linkPortal.baseUrl || !config.discord.clientSecret) {
       await interaction.reply({
         ephemeral: true,
-        content: "Linking isn't available right now — ask the bot's admin to set LINK_PORTAL_BASE_URL.",
+        content:
+          "Linking isn't available right now — ask the bot's admin to set LINK_PORTAL_BASE_URL " +
+          "and DISCORD_CLIENT_SECRET.",
       });
       return;
     }
@@ -440,12 +438,11 @@ export class DiscordBot {
     const slot = await this.joinAndAllocate(interaction);
     if (!slot) return;
 
-    // Fetching the authorization URL means relaunching the daemon — defer so we
+    // Starting the authorization means relaunching the daemon — defer so we
     // don't hit Discord's 3s interaction deadline.
     await interaction.deferReply({ ephemeral: true });
-    let url: string;
     try {
-      url = await slot.beginRelink();
+      await slot.beginRelink();
     } catch (err) {
       await interaction.editReply(
         `Couldn't start the Spotify login: ${(err as Error).message}. Try \`/link\` again.`,
@@ -453,11 +450,10 @@ export class DiscordBot {
       return;
     }
 
-    const portalUrl = this.linkPortal.beginSession(interaction.user.id, url);
     await interaction.editReply(
       `**Link your Spotify to ${slot.deviceName}**\n\n` +
-        `Open this page and follow the two steps there:\n${portalUrl}\n\n` +
-        `Then pick **${slot.deviceName}** in Spotify → Devices and press play.`,
+        `Open ${config.linkPortal.baseUrl} and log in with Discord (if you haven't already) to finish — ` +
+        `then pick **${slot.deviceName}** in Spotify → Devices and press play.`,
     );
   }
 

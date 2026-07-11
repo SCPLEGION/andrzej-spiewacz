@@ -20,6 +20,10 @@ export const config = {
     clientId: required("DISCORD_CLIENT_ID"),
     /** Empty string => register commands globally. */
     guildId: optional("DISCORD_GUILD_ID", ""),
+    /** OAuth2 client secret for "Login with Discord" on the link portal (not
+     * needed for the bot itself). Add the portal's callback URL as a redirect
+     * in the Discord Developer Portal. Left empty, the portal won't start. */
+    clientSecret: optional("DISCORD_CLIENT_SECRET", ""),
   },
   librespot: {
     deviceName: optional("LIBRESPOT_DEVICE_NAME", "Andrzej Śpiewacz"),

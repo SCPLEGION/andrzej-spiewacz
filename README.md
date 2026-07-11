@@ -129,31 +129,35 @@ To go back to LAN-only mDNS discovery instead, set `LIBRESPOT_AUTH=zeroconf`.
 
 ## Link portal
 
-`/link` doesn't paste raw OAuth links into Discord — it sends each user a
-one-time link to a small public web page (`LINK_PORTAL_BASE_URL`, e.g.
-`https://spiewacz.scplegion.ovh`) that replaces the old `/code` command:
+`/link` doesn't paste raw OAuth links into Discord anymore, and there's no
+per-user token to hand out either — the portal (`LINK_PORTAL_BASE_URL`, e.g.
+`https://spiewacz.scplegion.ovh`) uses a real **Discord OAuth2 login**
+(`identify` scope only) with a signed, `HttpOnly` session cookie. Visit the
+domain, click **Zaloguj przez Discord**, and it shows whatever state your
+player is in:
 
-1. **Autoryzuj Spotify** button → the same authorize URL `/link` used to post
-   directly into Discord.
-2. A box to paste the broken `127.0.0.1...` redirect URL the browser lands on
-   after approving — submitting it finishes the login (what `/code` used to do).
-3. Once linked, the same page flips to a tiny status view: device name and
-   whatever's currently playing. Nothing else — no other user's data is ever
-   shown here, unlike the admin control panel below.
+- **Never run `/link`** — a short "what is this bot" page telling you to run
+  it on Discord first.
+- **Mid-login** (ran `/link`, haven't finished Spotify auth) — the
+  **Autoryzuj Spotify** button (the same authorize URL that used to be posted
+  directly into Discord), plus a box to paste the broken `127.0.0.1...`
+  redirect URL the browser lands on after approving — submitting it finishes
+  the login (what `/code` used to do).
+- **Linked** — a tiny status view: device name, whatever's currently playing,
+  and the voice-channel-status toggle below. Nothing else — no other user's
+  data is ever shown here, unlike the admin control panel below.
 
-The link is a random, unguessable token good for 30 minutes, sent only in an
-**ephemeral** Discord reply (visible to the caller alone) — there's no login
-system on the site itself; possession of the link is the auth, the same trust
-model as an emailed magic link. Running `/link` again invalidates whatever link
-was pending before.
+One-time setup for the Discord side: in the [Discord Developer
+Portal](https://discord.com/developers/applications), open the bot's
+application → OAuth2 → add `<LINK_PORTAL_BASE_URL>/auth/discord/callback`
+under **Redirects** (must match exactly), and copy the **Client Secret** into
+`DISCORD_CLIENT_SECRET`. Without it, the portal refuses to start (same as a
+missing `LINK_PORTAL_BASE_URL`).
 
-The bare domain (`/`) is a short "what is this bot" page plus a fallback box
-to paste your token (or the whole link) into, for anyone who lands there
-instead of clicking their `/link` link directly — it's not a dashboard, and
-never shows any other user's data. Getting "not found" anywhere else on the
-domain (any path besides `/`, `/link/:token` and `/link/:token/mode`) after
-clicking the actual Discord link means the reverse proxy isn't reaching port
-`8078`.
+The session cookie is signed with a random secret generated fresh every time
+the bot process starts — so a restart naturally logs everyone out rather than
+needing an explicit expiry or a persisted signing key. `/auth/logout` clears
+it early if you want to.
 
 **Why there's no `/callback` receiving Spotify's redirect directly:**
 go-librespot's OAuth redirect URI is hardcoded to `http://127.0.0.1:<port>/login`
@@ -218,8 +222,8 @@ npm run typecheck
 Tests live in `test/` and cover the pure logic — config-yaml generation, event
 mapping, volume clamping, ffmpeg args, panel and link-portal status/HTML
 rendering, the slash-command schema, per-index config derivation, the
-user→index registry assignment, link-portal token expiry, and the per-user
-channel-status preference store.
+user→index registry assignment, session cookie signing/verification, and the
+per-user channel-status preference store.
 
 ## Notes & gotchas
 

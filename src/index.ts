@@ -12,7 +12,7 @@ async function main(): Promise<void> {
 
   const pool = new PlayerPool();
   const linkPortal = new LinkPortal(pool);
-  const bot = new DiscordBot(pool, linkPortal);
+  const bot = new DiscordBot(pool);
   const panel = new ControlPanel(pool, bot);
 
   // Nothing to start yet (no players run until a user links/joins); connect to
