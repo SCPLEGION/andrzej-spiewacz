@@ -54,23 +54,36 @@ frame instead of waiting for the FIFO + ffmpeg buffer to drain.
 3. **Create the Discord bot** at <https://discord.com/developers/applications>:
    - Bot tab → reset/copy the **token**.
    - General Information → copy the **Application ID**.
+   - OAuth2 tab → copy the **Client Secret**, and add
+     `<LINK_PORTAL_BASE_URL>/auth/discord/callback` under **Redirects** (needed
+     for "Login with Discord" on the link portal — see [Link portal](#link-portal)).
    - Invite it with the `bot` and `applications.commands` scopes and the
      **Connect** + **Speak** voice permissions.
    - No privileged intents are required.
 
-4. **Configure** — copy and fill in:
+4. **Create a Spotify app** at <https://developer.spotify.com/dashboard> (any
+   name; pick **Web API** when asked which APIs you're using). Add
+   `<LINK_PORTAL_BASE_URL>/auth/spotify/callback` as its **Redirect URI**, then
+   copy the **Client ID** and **Client Secret**. This is the default auth path
+   (`LIBRESPOT_AUTH=spotify_token`) — go-librespot's own built-in OAuth client
+   is currently rejected by Spotify with `invalid_scope` (see
+   [Remote access](#remote-access-any-network)), so this bot uses its own app
+   instead.
+
+5. **Configure** — copy and fill in:
    ```bash
    cp .env.example .env
    ```
-   Set at minimum `DISCORD_TOKEN`, `DISCORD_CLIENT_ID`, and (for instant slash
-   commands during dev) `DISCORD_GUILD_ID`.
+   Set at minimum `DISCORD_TOKEN`, `DISCORD_CLIENT_ID`, `DISCORD_CLIENT_SECRET`,
+   `SPOTIFY_CLIENT_ID`, `SPOTIFY_CLIENT_SECRET`, `LINK_PORTAL_BASE_URL`, and
+   (for instant slash commands during dev) `DISCORD_GUILD_ID`.
 
-5. **Register slash commands**:
+6. **Register slash commands**:
    ```bash
    npm run register
    ```
 
-6. **Run**:
+7. **Run**:
    ```bash
    npm run dev     # watch mode (tsx)
    # or
@@ -108,63 +121,67 @@ run `/link` (or `/join`) first.
 
 ## Remote access (any network)
 
-By default `LIBRESPOT_AUTH=interactive`: once a user's daemon has stored
-credentials, it connects **directly to Spotify's servers**, so their speaker
-shows up in the Spotify app from any network — phone on mobile data, work
-laptop, wherever. No mDNS, no same-LAN requirement.
+Once a user is linked, their speaker connects **directly to Spotify's
+servers**, so it shows up in the Spotify app from any network — phone on
+mobile data, work laptop, wherever. No mDNS, no same-LAN requirement, no
+SSH-tunneling anything.
 
-**Headless host?** During `/link`, go-librespot's OAuth redirect points at
-`http://127.0.0.1:<callback_port>/login` on the *bot's* machine — that's why the
-[link portal](#link-portal) page says the browser tab "won't load" after you
-approve: Spotify redirects the user's own browser there, and on a remote host
-that loopback isn't the user's machine. The address bar still contains the
-`code=...` needed, though — the portal has you paste the whole URL into a form
-instead of a Discord command, and submits it to the bot's own local callback
-for you. Nobody needs to SSH-tunnel anything for this; the callback port is
-only ever hit by the bot process itself, never exposed externally (so it
-doesn't need to be published in `docker-compose.yml` either, unlike the panel
-and link-portal ports).
+**Why `LIBRESPOT_AUTH=spotify_token` is the default, not `interactive`:**
+go-librespot ships its own built-in OAuth client for the `interactive` mode,
+but Spotify currently rejects it outright with `invalid_scope` — verified by
+inspecting the binary, this isn't something a config option can fix (the
+scope list is hardcoded in the built client). That's a restriction on
+go-librespot's *shared* client, imposed by Spotify, and can change again
+without any code here changing — but until/unless it does, `interactive` mode
+plain doesn't work. `spotify_token` mode sidesteps it entirely by using **our
+own** registered Spotify app (see [Setup](#setup) step 4) instead: `/link` +
+the [link portal](#link-portal)'s **Link Spotify** button send the user
+through a completely normal Spotify OAuth screen, and Spotify redirects the
+browser straight back to *our own domain* (`<LINK_PORTAL_BASE_URL>/auth/spotify/callback`)
+— no loopback redirect, no copy-pasting a broken URL, works identically on a
+remote host as on a local one. The resulting refresh token is stored per-user
+(`state/spotify-tokens.json`) and a fresh access token is minted from it every
+time that user's player (re)starts.
 
-To go back to LAN-only mDNS discovery instead, set `LIBRESPOT_AUTH=zeroconf`.
+`interactive` mode's built-in OAuth is left in the code in case Spotify's
+restriction on that shared client gets lifted upstream, but isn't used by
+default. `zeroconf` mode (LAN-only mDNS) is unaffected either way.
 
 ## Link portal
 
-`/link` doesn't paste raw OAuth links into Discord anymore, and there's no
-per-user token to hand out either — the portal (`LINK_PORTAL_BASE_URL`, e.g.
-`https://spiewacz.scplegion.ovh`) uses a real **Discord OAuth2 login**
-(`identify` scope only) with a signed, `HttpOnly` session cookie. Visit the
-domain, click **Zaloguj przez Discord**, and it shows whatever state your
-player is in:
+The portal (`LINK_PORTAL_BASE_URL`, e.g. `https://spiewacz.scplegion.ovh`)
+uses a real **Discord OAuth2 login** (`identify` scope only) with a signed,
+`HttpOnly` session cookie — there's no per-user token embedded in a URL
+anymore. Visit the domain, click **Zaloguj przez Discord**, and it shows
+whatever state your account is in:
 
-- **Never run `/link`** — a short "what is this bot" page telling you to run
-  it on Discord first.
-- **Mid-login** (ran `/link`, haven't finished Spotify auth) — the
-  **Autoryzuj Spotify** button (the same authorize URL that used to be posted
-  directly into Discord), plus a box to paste the broken `127.0.0.1...`
-  redirect URL the browser lands on after approving — submitting it finishes
-  the login (what `/code` used to do).
+- **No Spotify link yet** — a **Połącz Spotify** button. Clicking it is a
+  completely normal Spotify login screen (via our own app); approving sends
+  you straight back here, linked — no code to copy, no `/link` on Discord
+  required first (though you still need `/join` in Discord afterward to
+  actually bring the bot into your voice channel).
 - **Linked** — a tiny status view: device name, whatever's currently playing,
   and the voice-channel-status toggle below. Nothing else — no other user's
   data is ever shown here, unlike the admin control panel below.
+
+(In legacy `LIBRESPOT_AUTH=interactive` mode instead, the flow is: run `/link`
+on Discord first, then the portal shows the **Autoryzuj Spotify** button plus
+a box to paste the broken `127.0.0.1...` redirect URL — this is the flow
+described in [Remote access](#remote-access-any-network) above, only usable
+if Spotify's restriction on go-librespot's built-in client ever lifts.)
 
 One-time setup for the Discord side: in the [Discord Developer
 Portal](https://discord.com/developers/applications), open the bot's
 application → OAuth2 → add `<LINK_PORTAL_BASE_URL>/auth/discord/callback`
 under **Redirects** (must match exactly), and copy the **Client Secret** into
 `DISCORD_CLIENT_SECRET`. Without it, the portal refuses to start (same as a
-missing `LINK_PORTAL_BASE_URL`).
+missing `LINK_PORTAL_BASE_URL`). The Spotify side needs the same treatment —
+see [Setup](#setup) step 4.
 
 The session cookie is signed with a random secret generated fresh every time
 the bot process starts — so a restart naturally logs everyone out rather than
 needing an explicit expiry or a persisted signing key. `/auth/logout` clears
 it early if you want to.
-
-**Why there's no `/callback` receiving Spotify's redirect directly:**
-go-librespot's OAuth redirect URI is hardcoded to `http://127.0.0.1:<port>/login`
-in the binary itself (verified by inspecting it — there's no config option for
-it) — Spotify will only ever redirect back to the bot's own loopback, never to
-our domain, so the "paste the broken link" step is an unavoidable consequence
-of using go-librespot's built-in interactive auth rather than a design choice.
 
 **Voice channel status.** The status page also has a small radio-button toggle
 — *Wyłączony* (off), *Nazwa piosenki* (song name), or *Teksty na żywo*
@@ -219,17 +236,23 @@ npm test        # unit tests (Node's built-in runner via tsx)
 npm run typecheck
 ```
 
-Tests live in `test/` and cover the pure logic — config-yaml generation, event
-mapping, volume clamping, ffmpeg args, panel and link-portal status/HTML
-rendering, the slash-command schema, per-index config derivation, the
-user→index registry assignment, session cookie signing/verification, and the
-per-user channel-status preference store.
+Tests live in `test/` and cover the pure logic — config-yaml generation
+(including the spotify_token credentials block), event mapping, volume
+clamping, ffmpeg args, panel and link-portal status/HTML rendering, the
+slash-command schema, per-index config derivation, the user→index registry
+assignment, session cookie signing/verification, the per-user Spotify
+refresh-token store, and the per-user channel-status preference store.
 
 ## Notes & gotchas
 
-- **First `/link`** persists credentials under `state/<n>/state.json` (`state/`
-  itself for index 0) so that user's daemon reconnects automatically on every
-  later `/join` — no re-authorizing.
+- **`state/spotify-tokens.json`** (spotify_token mode) is the permanent Discord
+  user → Spotify refresh-token mapping — this, not go-librespot's own
+  `state.json`, is what makes a user "linked". A fresh access token is minted
+  from it every time that user's player (re)starts; Spotify may rotate the
+  refresh token itself, in which case the rotated one is persisted here too.
+- **First `/link`** (interactive mode only) persists credentials under
+  `state/<n>/state.json` (`state/` itself for index 0) so that user's daemon
+  reconnects automatically on every later `/join` — no re-authorizing.
 - **`state/registry.json`** is the permanent Discord user → device-index
   mapping. It's never rewritten once a user has an index, and it's what makes
   `/join` recreate the *same* device for the *same* person after a restart.

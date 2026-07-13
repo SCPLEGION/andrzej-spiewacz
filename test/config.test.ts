@@ -13,9 +13,10 @@ import {
 } from "../src/config.js";
 import { resolve } from "node:path";
 
-test("parseAuthMode: accepts the two valid modes", () => {
+test("parseAuthMode: accepts all three valid modes", () => {
   assert.equal(parseAuthMode("interactive"), "interactive");
   assert.equal(parseAuthMode("zeroconf"), "zeroconf");
+  assert.equal(parseAuthMode("spotify_token"), "spotify_token");
 });
 
 test("parseAuthMode: rejects anything else", () => {
@@ -24,7 +25,7 @@ test("parseAuthMode: rejects anything else", () => {
 });
 
 test("config: sensible defaults with only Discord creds set", () => {
-  assert.equal(config.librespot.authMode, "interactive");
+  assert.equal(config.librespot.authMode, "spotify_token");
   assert.equal(config.librespot.callbackPort, 38080);
   assert.equal(config.librespot.apiPort, 3678);
   assert.equal(config.librespot.bitrate, 320);
@@ -36,6 +37,8 @@ test("config: sensible defaults with only Discord creds set", () => {
   assert.equal(config.linkPortal.port, 8078);
   assert.equal(config.linkPortal.baseUrl, "");
   assert.equal(config.discord.clientSecret, "");
+  assert.equal(config.spotify.clientId, "");
+  assert.equal(config.spotify.clientSecret, "");
 });
 
 test("derived API URLs follow host/port", () => {

@@ -329,7 +329,10 @@ export class ControlPanel {
         index: slot.index,
         device: slot.deviceName,
         authMode: config.librespot.authMode,
-        authenticated: slot.isAuthenticated(),
+        // spotify_token mode never writes go-librespot's own credential file
+        // (slot.isAuthenticated() checks that), so authentication is tracked
+        // per-user via the pool's stored refresh token instead.
+        authenticated: slot.assignedUserId ? this.pool.isUserAuthenticated(slot.assignedUserId) : slot.isAuthenticated(),
         authUrl: slot.getAuthUrl(),
         volume: slot.getVolumePercent(),
         track: slot.getTrack(),

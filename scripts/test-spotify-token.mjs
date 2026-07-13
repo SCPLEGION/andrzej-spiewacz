@@ -1,14 +1,18 @@
 #!/usr/bin/env node
 /**
- * One-off experiment, NOT part of the app: does an access token from OUR OWN
- * Spotify Developer app (registered separately, not go-librespot's built-in
- * client) let go-librespot establish a real Spotify Connect session?
+ * Standalone diagnostic for the real LIBRESPOT_AUTH=spotify_token flow (see
+ * src/spotifyAuth.ts / src/linkPortal.ts's /auth/spotify/* routes) — confirms
+ * a token from OUR OWN Spotify Developer app can authenticate a real Spotify
+ * Connect session through go-librespot, in isolation from the running bot.
  *
  * Doesn't touch the running bot or any real state — spawns go-librespot
  * against a throwaway config dir under state/spotify-token-test/, killed and
  * deleted when this script exits.
  *
- * Usage (reads SPOTIFY_CLIENT_ID / SPOTIFY_CLIENT_SECRET / SPOTIFY_REDIRECT_URI
+ * Uses the exact same redirect_uri as the real app (<LINK_PORTAL_BASE_URL>/auth/spotify/callback),
+ * so it works against the same Spotify app registration with no separate setup.
+ *
+ * Usage (reads SPOTIFY_CLIENT_ID / SPOTIFY_CLIENT_SECRET / LINK_PORTAL_BASE_URL
  * from .env automatically — no need to export them by hand):
  *   node scripts/test-spotify-token.mjs        -> prints an authorize URL to open in your browser
  *   node scripts/test-spotify-token.mjs <code> -> exchanges the code, tries to auth go-librespot with it
@@ -20,7 +24,9 @@ import { resolve } from "node:path";
 
 const CLIENT_ID = process.env.SPOTIFY_CLIENT_ID;
 const CLIENT_SECRET = process.env.SPOTIFY_CLIENT_SECRET;
-const REDIRECT_URI = process.env.SPOTIFY_REDIRECT_URI || "https://spiewacz.scplegion.ovh/callback";
+const REDIRECT_URI =
+  process.env.SPOTIFY_REDIRECT_URI ||
+  `${(process.env.LINK_PORTAL_BASE_URL || "https://spiewacz.scplegion.ovh").replace(/\/$/, "")}/auth/spotify/callback`;
 const TEST_PORT = 19999;
 
 if (!CLIENT_ID || !CLIENT_SECRET) {

@@ -394,7 +394,7 @@ export class DiscordBot {
     const slot = await this.joinAndAllocate(interaction);
     if (!slot) return;
 
-    if (!slot.isAuthenticated()) {
+    if (!this.pool.isUserAuthenticated(interaction.user.id)) {
       await interaction.reply({
         content:
           `Joined on player **${slot.deviceName}**, but it isn't linked to a Spotify ` +
@@ -420,17 +420,14 @@ export class DiscordBot {
       return;
     }
 
-    // If this user already owns a LINKED player, /link would wipe that account's
-    // credentials and kill its live stream (relink restarts the daemon). Make
-    // them /leave first to switch accounts. A held-but-unlinked slot (plain
-    // /join, or a previously failed link) is fine to (re)link.
-    const held = this.pool.slotForUser(interaction.user.id);
-    if (held?.isAuthenticated()) {
+    // If this user is already linked, /link would either wipe their account's
+    // credentials (interactive mode) or needlessly re-mint a token (spotify_token
+    // mode). Make them /leave first to switch accounts.
+    const userId = interaction.user.id;
+    if (this.pool.isUserAuthenticated(userId)) {
       await interaction.reply({
         ephemeral: true,
-        content:
-          `You're already linked to **${held.deviceName}**. ` +
-          `Run \`/leave\` first if you want to connect a different Spotify account.`,
+        content: "You're already linked. Run `/leave` first if you want to connect a different Spotify account.",
       });
       return;
     }
@@ -438,8 +435,21 @@ export class DiscordBot {
     const slot = await this.joinAndAllocate(interaction);
     if (!slot) return;
 
-    // Starting the authorization means relaunching the daemon — defer so we
-    // don't hit Discord's 3s interaction deadline.
+    if (config.librespot.authMode === "spotify_token") {
+      // Our own Spotify app handles this on the web — go-librespot's built-in
+      // OAuth client is currently rejected by Spotify (invalid_scope) and isn't
+      // used for this auth mode at all.
+      await interaction.reply({
+        ephemeral: true,
+        content:
+          `**Link your Spotify to ${slot.deviceName}**\n\n` +
+          `Open ${config.linkPortal.baseUrl}, log in with Discord, and click **Link Spotify** — ` +
+          `then pick **${slot.deviceName}** in Spotify → Devices and press play.`,
+      });
+      return;
+    }
+
+    // Legacy interactive-OAuth path (zeroconf has no /link flow at all).
     await interaction.deferReply({ ephemeral: true });
     try {
       await slot.beginRelink();
@@ -809,9 +819,9 @@ export class DiscordBot {
 
   private async cmdDevice(interaction: ChatInputCommandInteraction): Promise<void> {
     const reachability =
-      config.librespot.authMode === "interactive"
-        ? `_Each player is linked to its own account via OAuth — selectable from any network._`
-        : `_Requires the bot host and your Spotify app on the same network (Zeroconf)._`;
+      config.librespot.authMode === "zeroconf"
+        ? `_Requires the bot host and your Spotify app on the same network (Zeroconf)._`
+        : `_Each player is linked to its own account via OAuth — selectable from any network._`;
     await interaction.reply({
       ephemeral: true,
       content:

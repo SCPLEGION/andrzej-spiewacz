@@ -11,7 +11,7 @@ import {
   type VoiceConnection,
 } from "@discordjs/voice";
 import { resolve } from "node:path";
-import { STATE_BASE_DIR, librespotSlot, type LibrespotSlot } from "./config.js";
+import { config, STATE_BASE_DIR, librespotSlot, type LibrespotSlot } from "./config.js";
 import { AudioBridge } from "./audio.js";
 import { LibrespotManager, hasStoredCredentials, clampVolumePercent, type TrackMetadata } from "./librespot.js";
 import { assignSlot, loadRegistry, saveRegistry, type WorkerRegistry } from "./registry.js";
@@ -23,6 +23,15 @@ import {
   type ChannelStatusMode,
   type ChannelStatusPrefs,
 } from "./channelStatusPrefs.js";
+import { refreshSpotifyToken } from "./spotifyAuth.js";
+import {
+  getSpotifyToken,
+  setSpotifyToken,
+  loadSpotifyTokens,
+  saveSpotifyTokens,
+  type SpotifyTokenEntry,
+  type SpotifyTokens,
+} from "./spotifyTokens.js";
 
 /**
  * One independent player: a dedicated go-librespot instance (its own Spotify
@@ -175,6 +184,26 @@ export class PlayerSlot extends EventEmitter {
     return this.librespot.submitAuthCode(code);
   }
 
+  /**
+   * First-time start (auth mode "spotify_token"): bring up the audio bridge
+   * and go-librespot together, authenticating immediately with a
+   * freshly-minted token from our own Spotify app.
+   */
+  async startWithSpotifyToken(username: string, accessToken: string): Promise<void> {
+    this.librespot.setSpotifyToken(username, accessToken);
+    await this.librespot.start();
+    this.audio.start();
+  }
+
+  /**
+   * Relink an already-running slot with a new Spotify token — only the
+   * go-librespot daemon restarts; the audio bridge is left alone since it
+   * just keeps reading from the same FIFO once the new daemon writes to it.
+   */
+  relinkSpotifyToken(username: string, accessToken: string): Promise<void> {
+    return this.librespot.startWithSpotifyToken(username, accessToken);
+  }
+
   playpause(): Promise<void> {
     return this.librespot.playpause();
   }
@@ -310,15 +339,18 @@ export function createDingResource(): AudioResource {
 export class PlayerPool extends EventEmitter {
   private registry: WorkerRegistry;
   private channelStatusPrefs: ChannelStatusPrefs;
+  private spotifyTokens: SpotifyTokens;
   private readonly active = new Map<number, PlayerSlot>();
 
   constructor(
     private readonly registryPath: string = resolve(STATE_BASE_DIR, "registry.json"),
     private readonly channelStatusPrefsPath: string = resolve(STATE_BASE_DIR, "channel-status.json"),
+    private readonly spotifyTokensPath: string = resolve(STATE_BASE_DIR, "spotify-tokens.json"),
   ) {
     super();
     this.registry = loadRegistry(registryPath);
     this.channelStatusPrefs = loadChannelStatusPrefs(channelStatusPrefsPath);
+    this.spotifyTokens = loadSpotifyTokens(spotifyTokensPath);
   }
 
   /** Number of players currently running (linked/joined right now). */
@@ -350,27 +382,96 @@ export class PlayerPool extends EventEmitter {
     return this.active.get(index);
   }
 
-  /**
-   * Get-or-create `userId`'s permanent player: assigns them a never-reused
-   * index on first call (persisted to registry.json), then lazily starts their
-   * go-librespot daemon — loading whatever Spotify credentials are already
-   * stored for that index — if it isn't already running. Always succeeds;
-   * there's no cap on how many users can have a player.
-   */
-  async getOrCreate(userId: string): Promise<PlayerSlot> {
+  /** Get-or-construct `userId`'s permanent PlayerSlot record without starting
+   *  anything, so callers can tell a brand-new instance from an already-active
+   *  one before deciding how to bring it up. */
+  private ensureSlotRecord(userId: string): { slot: PlayerSlot; created: boolean } {
     const assigned = assignSlot(this.registry, userId);
     this.registry = assigned.registry;
     if (assigned.created) saveRegistry(this.registry, this.registryPath);
 
     const existing = this.active.get(assigned.index);
-    if (existing) return existing;
+    if (existing) return { slot: existing, created: false };
 
     const slot = new PlayerSlot(librespotSlot(assigned.index));
     slot.assignedUserId = userId;
     this.active.set(assigned.index, slot);
     this.emit("playerCreated", slot);
+    return { slot, created: true };
+  }
+
+  /**
+   * Get-or-create `userId`'s permanent player: assigns them a never-reused
+   * index on first call (persisted to registry.json), then lazily starts their
+   * go-librespot daemon if it isn't already running. In "spotify_token" auth
+   * mode, a brand-new instance for a user with a stored Spotify link mints a
+   * fresh access token and starts already-authenticated; otherwise it starts
+   * with whatever credentials (if any) are already on disk for that index.
+   * Always succeeds; there's no cap on how many users can have a player.
+   */
+  async getOrCreate(userId: string): Promise<PlayerSlot> {
+    const { slot, created } = this.ensureSlotRecord(userId);
+    if (!created) return slot;
+
+    const stored = config.librespot.authMode === "spotify_token" ? getSpotifyToken(this.spotifyTokens, userId) : undefined;
+    if (stored) {
+      try {
+        const accessToken = await this.mintFreshSpotifyAccessToken(userId, stored);
+        await slot.startWithSpotifyToken(stored.spotifyUserId, accessToken);
+        return slot;
+      } catch (err) {
+        console.warn(`[pool] couldn't refresh Spotify token for ${userId}, starting unauthenticated: ${(err as Error).message}`);
+      }
+    }
     await slot.start();
     return slot;
+  }
+
+  /**
+   * Persist `userId`'s Spotify link (from the link portal's OAuth callback)
+   * and (re)start their player with the token we just minted — handles both a
+   * brand-new player and relinking one that's already running.
+   */
+  async linkSpotifyAccount(
+    userId: string,
+    spotifyUserId: string,
+    refreshToken: string,
+    accessToken: string,
+  ): Promise<PlayerSlot> {
+    this.spotifyTokens = setSpotifyToken(this.spotifyTokens, userId, { spotifyUserId, refreshToken });
+    saveSpotifyTokens(this.spotifyTokens, this.spotifyTokensPath);
+
+    const { slot, created } = this.ensureSlotRecord(userId);
+    if (created) await slot.startWithSpotifyToken(spotifyUserId, accessToken);
+    else await slot.relinkSpotifyToken(spotifyUserId, accessToken);
+    return slot;
+  }
+
+  /**
+   * True once `userId` has a usable Spotify login: a stored refresh token in
+   * "spotify_token" auth mode, or go-librespot's own persisted credentials
+   * otherwise. Independent of whether their daemon is currently running.
+   */
+  isUserAuthenticated(userId: string): boolean {
+    if (config.librespot.authMode === "spotify_token") {
+      return getSpotifyToken(this.spotifyTokens, userId) !== undefined;
+    }
+    return this.slotForUser(userId)?.isAuthenticated() ?? false;
+  }
+
+  /** Mint a fresh access token from `stored`'s refresh token, persisting a
+   *  rotated refresh token if Spotify issued a new one. */
+  private async mintFreshSpotifyAccessToken(userId: string, stored: SpotifyTokenEntry): Promise<string> {
+    const fresh = await refreshSpotifyToken({
+      clientId: config.spotify.clientId,
+      clientSecret: config.spotify.clientSecret,
+      refreshToken: stored.refreshToken,
+    });
+    if (fresh.refreshToken && fresh.refreshToken !== stored.refreshToken) {
+      this.spotifyTokens = setSpotifyToken(this.spotifyTokens, userId, { ...stored, refreshToken: fresh.refreshToken });
+      saveSpotifyTokens(this.spotifyTokens, this.spotifyTokensPath);
+    }
+    return fresh.accessToken;
   }
 
   /**

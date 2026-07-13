@@ -39,8 +39,28 @@ test("buildConfigYaml: zeroconf persists credentials and omits interactive keys"
   assert.doesNotMatch(yaml, /type: interactive/);
 });
 
+test("buildConfigYaml: spotify_token disables zeroconf and embeds the given username/access token", () => {
+  const yaml = buildConfigYaml({
+    ...base,
+    authMode: "spotify_token",
+    spotifyToken: { username: "spotify_user_123", accessToken: "AABBCC" },
+  });
+  assert.match(yaml, /zeroconf_enabled: false/);
+  assert.match(yaml, /type: spotify_token/);
+  assert.match(yaml, /username: "spotify_user_123"/);
+  assert.match(yaml, /access_token: "AABBCC"/);
+  assert.doesNotMatch(yaml, /type: interactive/);
+  assert.doesNotMatch(yaml, /type: zeroconf/);
+});
+
+test("buildConfigYaml: spotify_token with no token yet still renders (empty strings)", () => {
+  const yaml = buildConfigYaml({ ...base, authMode: "spotify_token" });
+  assert.match(yaml, /username: ""/);
+  assert.match(yaml, /access_token: ""/);
+});
+
 test("buildConfigYaml: shared keys always present", () => {
-  for (const mode of ["interactive", "zeroconf"] as const) {
+  for (const mode of ["interactive", "zeroconf", "spotify_token"] as const) {
     const yaml = buildConfigYaml({ ...base, authMode: mode });
     assert.match(yaml, /audio_backend: pipe/);
     assert.match(yaml, /audio_output_pipe_format: s16le/);
@@ -50,7 +70,7 @@ test("buildConfigYaml: shared keys always present", () => {
 });
 
 test("buildConfigYaml: external_volume is enabled so gain is applied Discord-side", () => {
-  for (const mode of ["interactive", "zeroconf"] as const) {
+  for (const mode of ["interactive", "zeroconf", "spotify_token"] as const) {
     const yaml = buildConfigYaml({ ...base, authMode: mode });
     assert.match(yaml, /external_volume: true/);
     // Pinned so /player/volume is 0..100 and the echoed volume event reports

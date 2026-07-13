@@ -34,12 +34,24 @@ export const config = {
     bitrate: Number(optional("LIBRESPOT_BITRATE", "320")),
     /**
      * "zeroconf" — device only visible on the same LAN (mDNS).
-     * "interactive" — OAuth login once, then reachable from ANY network via
-     * Spotify's servers. Use this for a remote/headless host.
+     * "interactive" — go-librespot's own built-in OAuth client. Currently
+     *   broken: Spotify rejects it with invalid_scope (a restriction on that
+     *   shared client we can't configure around — verified in the binary).
+     * "spotify_token" — our own registered Spotify app hands go-librespot a
+     *   token directly (no loopback redirect, no built-in OAuth). Recommended;
+     *   requires SPOTIFY_CLIENT_ID/SECRET and the link portal.
      */
-    authMode: parseAuthMode(optional("LIBRESPOT_AUTH", "interactive")),
-    /** Fixed loopback port for the interactive OAuth redirect. */
+    authMode: parseAuthMode(optional("LIBRESPOT_AUTH", "spotify_token")),
+    /** Fixed loopback port for the interactive OAuth redirect (interactive mode only). */
     callbackPort: Number(optional("LIBRESPOT_CALLBACK_PORT", "38080")),
+  },
+  /** Our own Spotify Developer app, used for LIBRESPOT_AUTH=spotify_token. Not
+   * go-librespot's built-in client — register one at
+   * https://developer.spotify.com/dashboard with
+   * <LINK_PORTAL_BASE_URL>/auth/spotify/callback as its redirect URI. */
+  spotify: {
+    clientId: optional("SPOTIFY_CLIENT_ID", ""),
+    clientSecret: optional("SPOTIFY_CLIENT_SECRET", ""),
   },
   panel: {
     /** Set PANEL_ENABLED=false to disable the web control/auth panel. */
@@ -74,11 +86,11 @@ export const config = {
   },
 } as const;
 
-export type AuthMode = "zeroconf" | "interactive";
+export type AuthMode = "zeroconf" | "interactive" | "spotify_token";
 
 export function parseAuthMode(value: string): AuthMode {
-  if (value === "zeroconf" || value === "interactive") return value;
-  throw new Error(`LIBRESPOT_AUTH must be "zeroconf" or "interactive", got "${value}"`);
+  if (value === "zeroconf" || value === "interactive" || value === "spotify_token") return value;
+  throw new Error(`LIBRESPOT_AUTH must be "zeroconf", "interactive" or "spotify_token", got "${value}"`);
 }
 
 /** Base URL of the go-librespot HTTP API (slot 0). */

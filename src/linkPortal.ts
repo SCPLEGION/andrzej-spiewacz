@@ -11,6 +11,7 @@ import {
   parseCookies,
   SessionSigner,
 } from "./discordAuth.js";
+import { spotifyAuthorizeUrl, exchangeSpotifyCode, fetchSpotifyProfile } from "./spotifyAuth.js";
 
 const SESSION_COOKIE = "andrzej_session";
 
@@ -104,6 +105,21 @@ export function renderNoPlayerPage(deviceName: string): string {
     <p>Nie masz jeszcze swojego playera.</p>
     <p class="muted">Wejdź na kanał głosowy i wpisz <code>/link</code> na Discordzie,
     potem odśwież tę stronę.</p>
+    ${LOGOUT_LINK}
+  `);
+}
+
+/**
+ * Auth mode "spotify_token": the real Spotify login, via our own registered
+ * app — no copy-pasting a broken redirect URL, Spotify sends the code
+ * straight back to our own domain.
+ */
+export function renderSpotifyLinkPage(deviceName: string, error?: string): string {
+  return pageShell("Link your Spotify", deviceName, `
+    <p>Połącz swoje konto Spotify (wymaga <b>Premium</b>) — otworzy się prawdziwa
+    strona logowania Spotify, bez wklejania żadnych kodów.</p>
+    ${error ? `<p class="err">${escapeHtml(error)}</p>` : ""}
+    <a class="btn" href="/auth/spotify/login">Połącz Spotify</a>
     ${LOGOUT_LINK}
   `);
 }
@@ -220,6 +236,14 @@ export class LinkPortal {
       );
       return;
     }
+    if (config.librespot.authMode === "spotify_token" && (!config.spotify.clientId || !config.spotify.clientSecret)) {
+      // Non-fatal: Discord login still works, but /link can't finish since
+      // there's no credentials to reach our own Spotify app with.
+      console.warn(
+        "[link-portal] LIBRESPOT_AUTH=spotify_token but SPOTIFY_CLIENT_ID/SECRET are not set — " +
+          "'Link Spotify' will fail until they're configured.",
+      );
+    }
     const server = createServer((req, res) => void this.handle(req, res));
     server.on("error", (err: NodeJS.ErrnoException) => {
       if (err.code === "EADDRINUSE") {
@@ -247,8 +271,12 @@ export class LinkPortal {
     this.server = null;
   }
 
-  private redirectUri(): string {
+  private discordRedirectUri(): string {
     return `${config.linkPortal.baseUrl.replace(/\/$/, "")}/auth/discord/callback`;
+  }
+
+  private spotifyRedirectUri(): string {
+    return `${config.linkPortal.baseUrl.replace(/\/$/, "")}/auth/spotify/callback`;
   }
 
   private sessionUserId(req: IncomingMessage): string | null {
@@ -262,6 +290,17 @@ export class LinkPortal {
 
   /** Whatever state `userId`'s player is in, as the matching page. */
   private panelHtml(userId: string, error?: string): string {
+    if (config.librespot.authMode === "spotify_token") {
+      if (!this.pool.isUserAuthenticated(userId)) return renderSpotifyLinkPage(config.librespot.deviceName, error);
+      const slot = this.pool.slotForUser(userId);
+      return renderStatusPage({
+        deviceName: slot?.deviceName ?? config.librespot.deviceName,
+        track: toTrackView(slot?.getTrack() ?? null),
+        channelStatusMode: this.pool.getChannelStatusMode(userId),
+      });
+    }
+
+    // Legacy interactive-mode flow.
     const slot = this.pool.slotForUser(userId);
     if (slot?.isAuthenticated()) {
       return renderStatusPage({
@@ -286,6 +325,10 @@ export class LinkPortal {
     if (pathname === "/auth/discord/callback" && req.method === "GET") {
       return this.handleDiscordCallback(url, res);
     }
+    if (pathname === "/auth/spotify/login" && req.method === "GET") return this.handleSpotifyLogin(req, res);
+    if (pathname === "/auth/spotify/callback" && req.method === "GET") {
+      return this.handleSpotifyCallback(req, url, res);
+    }
     if (pathname === "/auth/logout" && req.method === "GET") return this.handleLogout(res);
     if (pathname === "/code" && req.method === "POST") return this.handleSubmitCode(req, res);
     if (pathname === "/mode" && req.method === "POST") return this.handleSetMode(req, res);
@@ -301,7 +344,7 @@ export class LinkPortal {
   }
 
   private handleDiscordLogin(res: ServerResponse): void {
-    res.writeHead(302, { location: discordAuthorizeUrl(config.discord.clientId, this.redirectUri()) });
+    res.writeHead(302, { location: discordAuthorizeUrl(config.discord.clientId, this.discordRedirectUri()) });
     res.end();
   }
 
@@ -314,7 +357,7 @@ export class LinkPortal {
       const accessToken = await exchangeDiscordCode({
         clientId: config.discord.clientId,
         clientSecret: config.discord.clientSecret,
-        redirectUri: this.redirectUri(),
+        redirectUri: this.discordRedirectUri(),
         code,
       });
       const user = await fetchDiscordUser(accessToken);
@@ -324,6 +367,52 @@ export class LinkPortal {
     } catch (err) {
       this.sendHtml(res, 502, renderAuthErrorPage(config.librespot.deviceName, (err as Error).message));
     }
+  }
+
+  private handleSpotifyLogin(req: IncomingMessage, res: ServerResponse): void {
+    if (!this.sessionUserId(req)) {
+      res.writeHead(302, { location: "/" });
+      res.end();
+      return;
+    }
+    res.writeHead(302, { location: spotifyAuthorizeUrl(config.spotify.clientId, this.spotifyRedirectUri()) });
+    res.end();
+  }
+
+  private async handleSpotifyCallback(req: IncomingMessage, url: URL, res: ServerResponse): Promise<void> {
+    const userId = this.sessionUserId(req);
+    if (!userId) {
+      res.writeHead(302, { location: "/" });
+      res.end();
+      return;
+    }
+    const errorParam = url.searchParams.get("error");
+    if (errorParam) {
+      return this.sendHtml(
+        res,
+        400,
+        renderSpotifyLinkPage(config.librespot.deviceName, `Spotify odrzuciło żądanie: ${errorParam}`),
+      );
+    }
+    const code = url.searchParams.get("code");
+    if (!code) {
+      return this.sendHtml(res, 400, renderSpotifyLinkPage(config.librespot.deviceName, "Brak kodu w odpowiedzi Spotify."));
+    }
+    try {
+      const token = await exchangeSpotifyCode({
+        clientId: config.spotify.clientId,
+        clientSecret: config.spotify.clientSecret,
+        redirectUri: this.spotifyRedirectUri(),
+        code,
+      });
+      if (!token.refreshToken) throw new Error("Spotify nie zwróciło refresh tokenu.");
+      const profile = await fetchSpotifyProfile(token.accessToken);
+      await this.pool.linkSpotifyAccount(userId, profile.id, token.refreshToken, token.accessToken);
+    } catch (err) {
+      return this.sendHtml(res, 502, renderSpotifyLinkPage(config.librespot.deviceName, (err as Error).message));
+    }
+    res.writeHead(302, { location: "/" });
+    res.end();
   }
 
   private handleLogout(res: ServerResponse): void {

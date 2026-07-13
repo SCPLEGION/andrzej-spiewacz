@@ -14,3 +14,6 @@ state/
 
 # OS
 .DS_Store
+
+# /graphify analysis output
+graphify-out/

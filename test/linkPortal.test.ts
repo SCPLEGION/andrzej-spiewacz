@@ -6,6 +6,7 @@ import {
   renderLinkForm,
   renderLoginPage,
   renderNoPlayerPage,
+  renderSpotifyLinkPage,
   renderStatusPage,
 } from "../src/linkPortal.js";
 
@@ -22,6 +23,19 @@ test("renderAuthErrorPage: shows the failure message, escaped, with a retry link
   assert.ok(!html.includes("<script>alert(1)</script>"));
   assert.ok(html.includes("&lt;script&gt;"));
   assert.ok(html.includes('href="/auth/discord/login"'));
+});
+
+test("renderSpotifyLinkPage: offers a Spotify login link and logout", () => {
+  const html = renderSpotifyLinkPage("Andrzej");
+  assert.ok(html.includes('href="/auth/spotify/login"'));
+  assert.ok(html.includes('href="/auth/logout"'));
+  assert.ok(!html.includes('class="err"'));
+});
+
+test("renderSpotifyLinkPage: surfaces an error message, escaped", () => {
+  const html = renderSpotifyLinkPage("Andrzej", `<script>alert(1)</script>`);
+  assert.ok(!html.includes("<script>alert(1)</script>"));
+  assert.ok(html.includes("&lt;script&gt;"));
 });
 
 test("renderNoPlayerPage: tells the user to run /link and offers logout", () => {

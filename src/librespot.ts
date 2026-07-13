@@ -95,15 +95,23 @@ export interface LibrespotConfigInput {
   bitrate: number;
   authMode: AuthMode;
   callbackPort: number;
+  /** Required when authMode is "spotify_token": a freshly-minted access token
+   *  from OUR OWN Spotify app, plus the Spotify user id it belongs to. */
+  spotifyToken?: { username: string; accessToken: string };
 }
 
 /**
- * Render the daemon's config.yml. Interactive mode disables zeroconf and uses a
- * stored OAuth credential (reachable from any network); zeroconf mode is LAN-only
- * mDNS discovery that persists credentials after the first connect.
+ * Render the daemon's config.yml.
+ * - "interactive" disables zeroconf and uses go-librespot's own built-in OAuth
+ *   client (currently rejected by Spotify with invalid_scope — kept for future
+ *   use if that gets fixed upstream, not used by this bot by default).
+ * - "spotify_token" also disables zeroconf, but hands the daemon a token from
+ *   OUR OWN Spotify app instead of using go-librespot's built-in client.
+ * - "zeroconf" is LAN-only mDNS discovery that persists credentials after the
+ *   first connect.
  */
 export function buildConfigYaml(opts: LibrespotConfigInput): string {
-  const { deviceName, fifoPath, apiHost, apiPort, bitrate, authMode, callbackPort } = opts;
+  const { deviceName, fifoPath, apiHost, apiPort, bitrate, authMode, callbackPort, spotifyToken } = opts;
   const lines = [
     `device_name: ${JSON.stringify(deviceName)}`,
     `device_type: speaker`,
@@ -135,6 +143,15 @@ export function buildConfigYaml(opts: LibrespotConfigInput): string {
       `  type: interactive`,
       `  interactive:`,
       `    callback_port: ${callbackPort}`,
+    );
+  } else if (authMode === "spotify_token") {
+    lines.push(
+      `zeroconf_enabled: false`,
+      `credentials:`,
+      `  type: spotify_token`,
+      `  spotify_token:`,
+      `    username: ${JSON.stringify(spotifyToken?.username ?? "")}`,
+      `    access_token: ${JSON.stringify(spotifyToken?.accessToken ?? "")}`,
     );
   } else {
     lines.push(
@@ -233,6 +250,8 @@ export class LibrespotManager extends EventEmitter {
   private relinkInFlight: Promise<string> | null = null;
   /** True between emitting the auth URL and credentials being persisted. */
   private awaitingCode = false;
+  /** Current spotify_token credentials (auth mode "spotify_token" only), written into config.yml on every (re)start. */
+  private spotifyToken: { username: string; accessToken: string } | null = null;
 
   private readonly apiBase: string;
   private readonly eventsUrl: string;
@@ -281,7 +300,29 @@ export class LibrespotManager extends EventEmitter {
   /** Write the generated daemon config into this slot's config dir. */
   private writeConfig(): void {
     mkdirSync(this.slot.stateDir, { recursive: true });
-    writeFileSync(this.configPath, buildConfigYaml(this.slot), "utf8");
+    writeFileSync(
+      this.configPath,
+      buildConfigYaml({ ...this.slot, spotifyToken: this.spotifyToken ?? undefined }),
+      "utf8",
+    );
+  }
+
+  /** Set the spotify_token credentials used on the next (re)start. */
+  setSpotifyToken(username: string, accessToken: string): void {
+    this.spotifyToken = { username, accessToken };
+  }
+
+  /**
+   * Restart the daemon with a freshly-minted Spotify access token (auth mode
+   * "spotify_token") — used to relink an already-running slot, or to refresh
+   * an expired token on a scheduled restart. Resolves once the daemon is back
+   * up; it does not wait for the Connect session itself to attach.
+   */
+  async startWithSpotifyToken(username: string, accessToken: string): Promise<void> {
+    this.setSpotifyToken(username, accessToken);
+    await this.stop();
+    this.shuttingDown = false;
+    await this.start();
   }
 
   async start(): Promise<void> {
