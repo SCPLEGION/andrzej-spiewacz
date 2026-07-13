@@ -29,6 +29,15 @@ export function setSpotifyToken(tokens: SpotifyTokens, userId: string, entry: Sp
   return { users: { ...tokens.users, [userId]: entry } };
 }
 
+/** Forget `userId`'s Spotify link (pure — returns a new store; the same
+ *  reference back if they had no link, so callers can skip a no-op save). */
+export function clearSpotifyToken(tokens: SpotifyTokens, userId: string): SpotifyTokens {
+  if (!(userId in tokens.users)) return tokens;
+  const users = { ...tokens.users };
+  delete users[userId];
+  return { users };
+}
+
 /**
  * Load the token store from disk, or an empty one if the file doesn't exist
  * yet. A corrupt file is logged and treated as empty rather than crashing.

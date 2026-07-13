@@ -8,6 +8,7 @@ import {
   emptySpotifyTokens,
   getSpotifyToken,
   setSpotifyToken,
+  clearSpotifyToken,
   loadSpotifyTokens,
   saveSpotifyTokens,
 } from "../src/spotifyTokens.js";
@@ -39,6 +40,26 @@ test("setSpotifyToken: overwrites an existing link for the same user (relink)", 
   let tokens = setSpotifyToken(emptySpotifyTokens(), "u1", { spotifyUserId: "s1", refreshToken: "rt1" });
   tokens = setSpotifyToken(tokens, "u1", { spotifyUserId: "s1_new", refreshToken: "rt2" });
   assert.deepEqual(getSpotifyToken(tokens, "u1"), { spotifyUserId: "s1_new", refreshToken: "rt2" });
+});
+
+test("clearSpotifyToken: forgets a user's link, pure (no mutation)", () => {
+  const withLink = setSpotifyToken(emptySpotifyTokens(), "u1", { spotifyUserId: "s1", refreshToken: "rt1" });
+  const cleared = clearSpotifyToken(withLink, "u1");
+  assert.equal(getSpotifyToken(cleared, "u1"), undefined);
+  assert.deepEqual(getSpotifyToken(withLink, "u1"), { spotifyUserId: "s1", refreshToken: "rt1" }); // original untouched
+});
+
+test("clearSpotifyToken: clearing a user with no link is a no-op (same reference)", () => {
+  const tokens = emptySpotifyTokens();
+  assert.equal(clearSpotifyToken(tokens, "u1"), tokens);
+});
+
+test("clearSpotifyToken: only removes the named user", () => {
+  let tokens = setSpotifyToken(emptySpotifyTokens(), "u1", { spotifyUserId: "s1", refreshToken: "rt1" });
+  tokens = setSpotifyToken(tokens, "u2", { spotifyUserId: "s2", refreshToken: "rt2" });
+  tokens = clearSpotifyToken(tokens, "u1");
+  assert.equal(getSpotifyToken(tokens, "u1"), undefined);
+  assert.deepEqual(getSpotifyToken(tokens, "u2"), { spotifyUserId: "s2", refreshToken: "rt2" });
 });
 
 test("loadSpotifyTokens: empty when the file doesn't exist", () => {

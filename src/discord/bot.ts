@@ -241,6 +241,8 @@ export class DiscordBot {
         return this.cmdLink(interaction);
       case "leave":
         return this.cmdLeave(interaction);
+      case "unlink":
+        return this.cmdUnlink(interaction);
       case "np":
         return this.cmdNowPlaying(interaction);
       case "lyrics":
@@ -391,18 +393,23 @@ export class DiscordBot {
   }
 
   private async cmdJoin(interaction: ChatInputCommandInteraction): Promise<void> {
-    const slot = await this.joinAndAllocate(interaction);
-    if (!slot) return;
-
+    // Check before bringing the bot into voice at all — no point joining a
+    // channel just to sit there unauthenticated.
     if (!this.pool.isUserAuthenticated(interaction.user.id)) {
       await interaction.reply({
-        content:
-          `Joined on player **${slot.deviceName}**, but it isn't linked to a Spotify ` +
-          `account yet. Run \`/link\` to connect your Spotify.`,
         ephemeral: true,
+        content:
+          config.librespot.authMode === "spotify_token"
+            ? `You haven't linked a Spotify account yet. Open ${config.linkPortal.baseUrl}, ` +
+              `log in with Discord, and click **Link Spotify** first.`
+            : "You haven't linked a Spotify account yet. Run `/link` first.",
       });
       return;
     }
+
+    const slot = await this.joinAndAllocate(interaction);
+    if (!slot) return;
+
     await interaction.reply(
       `Joined on player **${slot.deviceName}**.\n` +
         `Open Spotify → Devices → select **${slot.deviceName}**, then hit play.`,
@@ -479,15 +486,12 @@ export class DiscordBot {
     }
   }
 
-  private async cmdLeave(interaction: ChatInputCommandInteraction): Promise<void> {
+  /**
+   * Tear down whatever voice session `slot`'s owner has (if any) and stop
+   * their player. Shared by /leave and /unlink.
+   */
+  private async leaveVoice(interaction: ChatInputCommandInteraction, slot: PlayerSlot): Promise<void> {
     const userId = interaction.user.id;
-    const slot = this.pool.slotForUser(userId);
-    if (!slot) {
-      await interaction.reply({ content: "You're not linked to a player.", ephemeral: true });
-      return;
-    }
-    // Tear down the guild connection this user's slot is streaming into (if
-    // any), then release their slot back to the pool.
     const guildId = slot.activeGuildId ?? interaction.guild?.id ?? null;
     const session = guildId ? this.sessions.get(guildId) : undefined;
     if (session && session.slot === slot && guildId) {
@@ -497,7 +501,34 @@ export class DiscordBot {
     this.stopKaraoke(slot.index);
     this.clearChannelStatus(slot.index, session?.connection.joinConfig.channelId ?? null);
     await this.pool.release(userId);
+  }
+
+  private async cmdLeave(interaction: ChatInputCommandInteraction): Promise<void> {
+    const slot = this.pool.slotForUser(interaction.user.id);
+    if (!slot) {
+      await interaction.reply({ content: "You're not linked to a player.", ephemeral: true });
+      return;
+    }
+    await this.leaveVoice(interaction, slot);
     await interaction.reply({ content: "👋 Left voice.", ephemeral: true });
+  }
+
+  private async cmdUnlink(interaction: ChatInputCommandInteraction): Promise<void> {
+    const userId = interaction.user.id;
+    if (!this.pool.isUserAuthenticated(userId)) {
+      await interaction.reply({ content: "You're not linked to a Spotify account.", ephemeral: true });
+      return;
+    }
+    const slot = this.pool.slotForUser(userId);
+    if (slot) await this.leaveVoice(interaction, slot);
+    this.pool.clearSpotifyLink(userId);
+    await interaction.reply({
+      ephemeral: true,
+      content:
+        config.librespot.authMode === "spotify_token"
+          ? `🔌 Spotify account disconnected. Open ${config.linkPortal.baseUrl} and click **Link Spotify** to connect a different one.`
+          : "🔌 Disconnected. Run `/link` to connect a Spotify account again.",
+    });
   }
 
   private async cmdNowPlaying(interaction: ChatInputCommandInteraction): Promise<void> {

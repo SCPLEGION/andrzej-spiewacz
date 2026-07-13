@@ -111,6 +111,7 @@ frame instead of waiting for the FIFO + ffmpeg buffer to drain.
 | `/link` | Connect your Spotify account and join your voice channel (sends you a link portal URL) |
 | `/join` | Join your voice channel on your already-linked player |
 | `/leave` | Disconnect and stop your player |
+| `/unlink` | Disconnect your Spotify account (stops your player if running) so you can link a different one |
 | `/np` | Show the current track on your player |
 | `/playpause` `/skip` `/prev` | Transport control (your player) |
 | `/volume <0–100>` | Set your player's volume (instant, Discord-side) |

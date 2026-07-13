@@ -15,6 +15,7 @@ test("registers the expected command set", () => {
     "playpause",
     "prev",
     "skip",
+    "unlink",
     "volume",
   ]);
 });

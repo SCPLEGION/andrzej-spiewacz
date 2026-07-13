@@ -16,6 +16,9 @@ export const commands = [
     .setName("leave")
     .setDescription("Disconnect Andrzej from voice."),
   new SlashCommandBuilder()
+    .setName("unlink")
+    .setDescription("Disconnect your Spotify account so you can link a different one."),
+  new SlashCommandBuilder()
     .setName("np")
     .setDescription("Show what's currently playing."),
   new SlashCommandBuilder()

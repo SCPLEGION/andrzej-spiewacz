@@ -27,6 +27,7 @@ import { refreshSpotifyToken } from "./spotifyAuth.js";
 import {
   getSpotifyToken,
   setSpotifyToken,
+  clearSpotifyToken,
   loadSpotifyTokens,
   saveSpotifyTokens,
   type SpotifyTokenEntry,
@@ -457,6 +458,20 @@ export class PlayerPool extends EventEmitter {
       return getSpotifyToken(this.spotifyTokens, userId) !== undefined;
     }
     return this.slotForUser(userId)?.isAuthenticated() ?? false;
+  }
+
+  /**
+   * Forget `userId`'s stored Spotify refresh token (spotify_token mode only —
+   * in interactive mode the daemon's own credentials just get overwritten by
+   * the next relink, same as before). Their permanent device index is
+   * untouched: /link or the portal's "Link Spotify" button can connect a
+   * different account to the same device. Callers are expected to have
+   * already stopped the player themselves (e.g. via release()) if it's running.
+   */
+  clearSpotifyLink(userId: string): void {
+    if (getSpotifyToken(this.spotifyTokens, userId) === undefined) return;
+    this.spotifyTokens = clearSpotifyToken(this.spotifyTokens, userId);
+    saveSpotifyTokens(this.spotifyTokens, this.spotifyTokensPath);
   }
 
   /** Mint a fresh access token from `stored`'s refresh token, persisting a
