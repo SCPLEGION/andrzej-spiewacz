@@ -36,15 +36,22 @@ async function postToken(
     },
     body,
   });
-  const json = (await res.json()) as {
+  const text = await res.text();
+  let json: {
     access_token?: string;
     refresh_token?: string;
     expires_in?: number;
     error_description?: string;
     error?: string;
-  };
+  } = {};
+  try {
+    json = JSON.parse(text);
+  } catch {
+    // Spotify sometimes returns a plain-text error (e.g. Development Mode
+    // user restrictions) instead of JSON - fall through and surface `text`.
+  }
   if (!res.ok || !json.access_token) {
-    throw new Error(`Spotify token request failed: ${json.error_description || json.error || res.status}`);
+    throw new Error(`Spotify token request failed: ${json.error_description || json.error || text || res.status}`);
   }
   return { accessToken: json.access_token, refreshToken: json.refresh_token, expiresIn: json.expires_in ?? 3600 };
 }
@@ -88,9 +95,15 @@ export async function fetchSpotifyProfile(accessToken: string): Promise<SpotifyP
   const res = await fetch("https://api.spotify.com/v1/me", {
     headers: { authorization: `Bearer ${accessToken}` },
   });
-  const body = (await res.json()) as { id?: string; display_name?: string; error?: { message?: string } };
+  const text = await res.text();
+  let body: { id?: string; display_name?: string; error?: { message?: string } } = {};
+  try {
+    body = JSON.parse(text);
+  } catch {
+    // fall through, surface raw text below
+  }
   if (!res.ok || !body.id) {
-    throw new Error(`Couldn't fetch Spotify profile: ${body.error?.message || res.status}`);
+    throw new Error(`Couldn't fetch Spotify profile: ${body.error?.message || text || res.status}`);
   }
   return { id: body.id, displayName: body.display_name ?? body.id };
 }
